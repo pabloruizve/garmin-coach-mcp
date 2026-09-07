@@ -8252,6 +8252,26 @@ _HISTORY_MAX_WELLNESS_DAYS = 30
 _HISTORY_SLEEP_BETWEEN_DAYS_S = 0.35
 
 
+_ACTIVITY_TYPE_ES = {
+    "running": "Correr",
+    "treadmill_running": "Correr en cinta",
+    "walking": "Caminar",
+    "hiking": "Senderismo",
+    "trail_running": "Trail running",
+    "track_running": "Carrera en pista",
+    "cycling": "Ciclismo",
+    "road_biking": "Ciclismo en carretera",
+    "indoor_cycling": "Ciclismo indoor",
+    "mountain_biking": "Ciclismo de montaña",
+    "virtual_ride": "Ciclismo virtual",
+    "strength_training": "Fuerza",
+    "cardio": "Cardio",
+    "elliptical": "Elíptica",
+    "pool_swimming": "Natación en piscina",
+    "open_water_swimming": "Natación en aguas abiertas",
+    "swimming": "Natación",
+}
+
 def _compact_activity_for_history(activity: dict) -> dict:
     """Normalización compacta optimizada para listas históricas largas."""
     activity_type = (
@@ -9708,25 +9728,6 @@ try:
 except Exception:
     pass
 
-_ACTIVITY_TYPE_ES = {
-    "running": "Correr",
-    "treadmill_running": "Correr en cinta",
-    "walking": "Caminar",
-    "hiking": "Senderismo",
-    "trail_running": "Trail running",
-    "track_running": "Carrera en pista",
-    "cycling": "Ciclismo",
-    "road_biking": "Ciclismo en carretera",
-    "indoor_cycling": "Ciclismo indoor",
-    "mountain_biking": "Ciclismo de montaña",
-    "virtual_ride": "Ciclismo virtual",
-    "strength_training": "Fuerza",
-    "cardio": "Cardio",
-    "elliptical": "Elíptica",
-    "pool_swimming": "Natación en piscina",
-    "open_water_swimming": "Natación en aguas abiertas",
-    "swimming": "Natación",
-}
 
 _ACTIVITY_FAMILY_ES = {
     "endurance": "Resistencia",
