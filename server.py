@@ -5565,6 +5565,7 @@ _ACTIVITY_SUMMARY_KEYS = [
     "maxHR",
     "minHR",
     "averageSpeed",
+    "recoveryHeartRate",
     "averageMovingSpeed",
     "maxSpeed",
     "avgGradeAdjustedSpeed",
