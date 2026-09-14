@@ -9259,6 +9259,486 @@ def get_body_composition(
 
 # === WORKOUT & CALENDAR TOOLS ===
 
+_RUNNING_SPORT_TYPE = {
+    "sportTypeId": 1,
+    "sportTypeKey": "running",
+    "displayOrder": 1,
+}
+
+_WORKOUT_STEP_TYPES = {
+    "warmup": (1, "warmup", 1),
+    "cooldown": (2, "cooldown", 2),
+    "interval": (3, "interval", 3),
+    "recovery": (4, "recovery", 4),
+    "rest": (5, "rest", 5),
+    "repeat": (6, "repeat", 6),
+    "other": (7, "other", 7),
+}
+
+_WORKOUT_STEP_ALIASES = {
+    "calentamiento": "warmup",
+    "enfriamiento": "cooldown",
+    "vuelta_calma": "cooldown",
+    "trabajo": "interval",
+    "carrera": "interval",
+    "recuperacion": "recovery",
+    "recuperación": "recovery",
+    "descanso": "rest",
+    "repetir": "repeat",
+    "repeticion": "repeat",
+    "repetición": "repeat",
+    "otro": "other",
+}
+
+
+def _positive_number(value: Any, field: str) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} debe ser un número") from exc
+    if number <= 0:
+        raise ValueError(f"{field} debe ser mayor que 0")
+    return number
+
+
+def _pace_seconds_per_km(value: Any, field: str) -> float:
+    """Acepta segundos por km o un ritmo legible M:SS."""
+    if isinstance(value, str) and ":" in value:
+        parts = value.strip().split(":")
+        if len(parts) != 2:
+            raise ValueError(f"{field} debe tener formato M:SS")
+        try:
+            minutes, seconds = int(parts[0]), int(parts[1])
+        except ValueError as exc:
+            raise ValueError(f"{field} debe tener formato M:SS") from exc
+        if minutes < 0 or not 0 <= seconds < 60:
+            raise ValueError(f"{field} debe tener formato M:SS")
+        value = minutes * 60 + seconds
+    return _positive_number(value, field)
+
+
+def _workout_target(step: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Devuelve targetType y los campos adicionales que entiende Garmin."""
+    target = str(step.get("target_type") or "none").strip().lower()
+    target = {
+        "ninguno": "none",
+        "sin_objetivo": "none",
+        "ritmo": "pace",
+        "zona_fc": "heart_rate_zone",
+        "fc": "heart_rate_zone",
+        "cadencia": "cadence",
+    }.get(target, target)
+
+    if target in ("none", "no_target", "no.target"):
+        return ({
+            "workoutTargetTypeId": 1,
+            "workoutTargetTypeKey": "no.target",
+            "displayOrder": 1,
+        }, {})
+
+    if target == "pace":
+        fast_value = step.get("pace_fast_per_km", step.get("pace_min_per_km",
+            step.get("pace_min_sec_per_km")))
+        slow_value = step.get("pace_slow_per_km", step.get("pace_max_per_km",
+            step.get("pace_max_sec_per_km")))
+        if fast_value is None or slow_value is None:
+            raise ValueError(
+                "Un objetivo de ritmo requiere pace_fast_per_km y pace_slow_per_km "
+                "(segundos o M:SS)"
+            )
+        fast = _pace_seconds_per_km(fast_value, "pace_fast_per_km")
+        slow = _pace_seconds_per_km(slow_value, "pace_slow_per_km")
+        if fast > slow:
+            raise ValueError("pace_fast_per_km debe ser un ritmo más rápido que pace_slow_per_km")
+        return ({
+            "workoutTargetTypeId": 6,
+            "workoutTargetTypeKey": "pace.zone",
+            "displayOrder": 6,
+        }, {
+            # Garmin guarda los límites de ritmo como velocidad en m/s.
+            "targetValueOne": 1000.0 / fast,
+            "targetValueTwo": 1000.0 / slow,
+            "targetValueUnit": None,
+        })
+
+    if target == "heart_rate_zone":
+        try:
+            zone = int(step.get("zone", step.get("heart_rate_zone")))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("heart_rate_zone requiere zone entre 1 y 5") from exc
+        if not 1 <= zone <= 5:
+            raise ValueError("zone debe estar entre 1 y 5")
+        return ({
+            "workoutTargetTypeId": 4,
+            "workoutTargetTypeKey": "heart.rate.zone",
+            "displayOrder": 4,
+        }, {"zoneNumber": zone})
+
+    if target == "cadence":
+        low = _positive_number(step.get("cadence_min_spm"), "cadence_min_spm")
+        high = _positive_number(step.get("cadence_max_spm"), "cadence_max_spm")
+        if low > high:
+            raise ValueError("cadence_min_spm no puede superar cadence_max_spm")
+        return ({
+            "workoutTargetTypeId": 3,
+            "workoutTargetTypeKey": "cadence",
+            "displayOrder": 3,
+        }, {
+            "targetValueOne": low,
+            "targetValueTwo": high,
+            "targetValueUnit": None,
+        })
+
+    raise ValueError(
+        f"target_type no admitido: {target!r}. Usa none, pace, heart_rate_zone o cadence"
+    )
+
+
+def _build_running_steps(
+    steps: list[dict[str, Any]], order: list[int]
+) -> tuple[list[dict[str, Any]], float, float]:
+    if not isinstance(steps, list) or not steps:
+        raise ValueError("steps debe ser una lista no vacía")
+
+    result: list[dict[str, Any]] = []
+    total_seconds = 0.0
+    total_meters = 0.0
+    for index, raw_step in enumerate(steps, start=1):
+        if not isinstance(raw_step, dict):
+            raise ValueError(f"steps[{index}] debe ser un objeto")
+
+        kind = str(raw_step.get("type") or raw_step.get("step_type") or "").strip().lower()
+        kind = _WORKOUT_STEP_ALIASES.get(kind, kind)
+        if kind not in _WORKOUT_STEP_TYPES:
+            allowed = ", ".join(_WORKOUT_STEP_TYPES)
+            raise ValueError(f"steps[{index}].type no admitido: {kind!r}. Usa {allowed}")
+
+        step_order = order[0]
+        order[0] += 1
+        type_id, type_key, display_order = _WORKOUT_STEP_TYPES[kind]
+        step_type = {
+            "stepTypeId": type_id,
+            "stepTypeKey": type_key,
+            "displayOrder": display_order,
+        }
+
+        if kind == "repeat":
+            try:
+                repetitions = int(raw_step.get("repetitions", raw_step.get("iterations")))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"steps[{index}] repeat requiere repetitions") from exc
+            if not 2 <= repetitions <= 99:
+                raise ValueError(f"steps[{index}].repetitions debe estar entre 2 y 99")
+            child_steps, child_seconds, child_meters = _build_running_steps(
+                raw_step.get("steps"), order
+            )
+            result.append({
+                "type": "RepeatGroupDTO",
+                "stepOrder": step_order,
+                "stepType": step_type,
+                "numberOfIterations": repetitions,
+                "workoutSteps": child_steps,
+                "endCondition": {
+                    "conditionTypeId": 7,
+                    "conditionTypeKey": "iterations",
+                    "displayOrder": 7,
+                    "displayable": False,
+                },
+                "endConditionValue": float(repetitions),
+                "smartRepeat": False,
+            })
+            total_seconds += child_seconds * repetitions
+            total_meters += child_meters * repetitions
+            continue
+
+        duration = raw_step.get("duration_seconds")
+        distance = raw_step.get("distance_meters", raw_step.get("distance_m"))
+        lap_button = raw_step.get("lap_button") is True
+        supplied = sum(value is not None for value in (duration, distance)) + int(lap_button)
+        if supplied != 1:
+            raise ValueError(
+                f"steps[{index}] requiere exactamente uno de duration_seconds, "
+                "distance_meters o lap_button=true"
+            )
+
+        if duration is not None:
+            end_value = _positive_number(duration, f"steps[{index}].duration_seconds")
+            end_condition = {
+                "conditionTypeId": 2,
+                "conditionTypeKey": "time",
+                "displayOrder": 2,
+                "displayable": True,
+            }
+            total_seconds += end_value
+        elif distance is not None:
+            end_value = _positive_number(distance, f"steps[{index}].distance_meters")
+            end_condition = {
+                "conditionTypeId": 3,
+                "conditionTypeKey": "distance",
+                "displayOrder": 3,
+                "displayable": True,
+            }
+            total_meters += end_value
+        else:
+            end_value = None
+            end_condition = {
+                "conditionTypeId": 1,
+                "conditionTypeKey": "lap.button",
+                "displayOrder": 1,
+                "displayable": True,
+            }
+
+        target_type, target_values = _workout_target(raw_step)
+        executable = {
+            "type": "ExecutableStepDTO",
+            "stepOrder": step_order,
+            "stepType": step_type,
+            "endCondition": end_condition,
+            "endConditionValue": end_value,
+            "targetType": target_type,
+        }
+        executable.update(target_values)
+        if raw_step.get("description"):
+            executable["description"] = str(raw_step["description"])
+        result.append(executable)
+
+    return result, total_seconds, total_meters
+
+
+def _running_workout_payload(
+    name: str,
+    steps: list[dict[str, Any]],
+    description: str = "",
+    estimated_duration_seconds: int | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    clean_name = str(name or "").strip()
+    if not clean_name:
+        raise ValueError("name no puede estar vacío")
+    if len(clean_name) > 100:
+        raise ValueError("name no puede superar 100 caracteres")
+
+    workout_steps, calculated_seconds, calculated_meters = _build_running_steps(steps, [1])
+    if estimated_duration_seconds is None:
+        estimate = int(round(calculated_seconds))
+    else:
+        estimate = int(_positive_number(
+            estimated_duration_seconds, "estimated_duration_seconds"
+        ))
+
+    payload: dict[str, Any] = {
+        "workoutName": clean_name,
+        "sportType": dict(_RUNNING_SPORT_TYPE),
+        "estimatedDurationInSecs": estimate,
+        "workoutSegments": [{
+            "segmentOrder": 1,
+            "sportType": dict(_RUNNING_SPORT_TYPE),
+            "workoutSteps": workout_steps,
+        }],
+        "author": {},
+    }
+    if description:
+        payload["description"] = str(description).strip()
+    if calculated_meters:
+        payload["estimatedDistanceInMeters"] = calculated_meters
+
+    summary = {
+        "name": clean_name,
+        "estimated_duration_seconds": estimate,
+        "known_duration_seconds": calculated_seconds,
+        "known_distance_meters": calculated_meters,
+        "top_level_steps": len(workout_steps),
+    }
+    return payload, summary
+
+
+def _garmin_transport(api: Garmin) -> Any:
+    transport = getattr(api, "garth", None) or getattr(api, "client", None)
+    if transport is None:
+        raise RuntimeError("La versión instalada de garminconnect no expone un transporte HTTP")
+    return transport
+
+
+def _garmin_transport_call(api: Garmin, method: str, path: str, **kwargs: Any) -> Any:
+    uses_legacy_garth = getattr(api, "garth", None) is not None
+    fn = getattr(_garmin_transport(api), method, None)
+    if not callable(fn):
+        raise RuntimeError(f"El cliente Garmin no admite HTTP {method.upper()}")
+    if uses_legacy_garth:
+        return fn("connectapi", path, **kwargs)
+    # garminconnect >= 0.3 devuelve JSON solo cuando se solicita api=True.
+    return fn("connectapi", path, api=True, **kwargs)
+
+
+def _extract_workout_id(response: Any) -> Any:
+    if not isinstance(response, dict):
+        return None
+    for key in ("workoutId", "workout_id", "id"):
+        if response.get(key) is not None:
+            return response[key]
+    workout = response.get("workout")
+    if isinstance(workout, dict):
+        return _extract_workout_id(workout)
+    return None
+
+
+@mcp.tool
+def preview_running_workout(
+    name: str,
+    steps: list[dict[str, Any]],
+    description: str = "",
+    estimated_duration_seconds: int = None,
+) -> dict:
+    """Valida y previsualiza una sesión estructurada de carrera sin guardarla.
+
+    Cada paso usa type: warmup, interval, recovery, rest, cooldown, other o repeat.
+    Los nombres equivalentes en español también se aceptan. Un paso normal debe
+    incluir exactamente uno de: duration_seconds, distance_meters o lap_button=true.
+    Un repeat usa repetitions y una lista steps anidada.
+
+    Objetivos opcionales: target_type=pace con pace_fast_per_km y
+    pace_slow_per_km (segundos o texto M:SS); target_type=heart_rate_zone con
+    zone 1-5; o target_type=cadence con cadence_min_spm y cadence_max_spm.
+    """
+    payload, summary = _running_workout_payload(
+        name, steps, description, estimated_duration_seconds
+    )
+    return {"ok": True, "summary": summary, "garmin_payload": payload}
+
+
+@mcp.tool
+def create_running_workout(
+    name: str,
+    steps: list[dict[str, Any]],
+    description: str = "",
+    estimated_duration_seconds: int = None,
+    target_date: str = None,
+) -> dict:
+    """Crea una sesión estructurada de carrera en la biblioteca de Garmin.
+
+    Usa la misma estructura de steps que preview_running_workout. target_date es
+    opcional (YYYY-MM-DD): si se indica, además programa la sesión en el calendario.
+    Devuelve el workout_id necesario para consultar, programar, editar o borrar.
+
+    Ejemplo 12 km + 5 rectas con 30 s de recuperación:
+    steps=[{"type":"warmup","distance_meters":12000},
+      {"type":"repeat","repetitions":5,"steps":[
+        {"type":"interval","distance_meters":100},
+        {"type":"recovery","duration_seconds":30}]}]
+    Para sesiones definidas solo por distancia conviene indicar también
+    estimated_duration_seconds; es informativo y no crea un paso adicional.
+    """
+    payload, summary = _running_workout_payload(
+        name, steps, description, estimated_duration_seconds
+    )
+    parsed_date = _parse_date(target_date) if target_date else None
+    with FETCH_LOCK:
+        api = _get_api()
+        try:
+            if callable(getattr(api, "upload_workout", None)):
+                created = api.upload_workout(payload)
+            else:
+                created = _garmin_transport_call(
+                    api, "post", "/workout-service/workout", json=payload
+                )
+        except Exception as exc:
+            raise RuntimeError(f"No se pudo crear el entrenamiento {name!r}: {exc}") from exc
+
+        workout_id = _extract_workout_id(created)
+        scheduled = None
+        if parsed_date:
+            if workout_id is None:
+                raise RuntimeError(
+                    "Garmin creó el entrenamiento, pero la respuesta no contiene workoutId; "
+                    "no se pudo programar automáticamente"
+                )
+            try:
+                if callable(getattr(api, "schedule_workout", None)):
+                    scheduled = api.schedule_workout(workout_id, parsed_date)
+                else:
+                    scheduled = _garmin_transport_call(
+                        api,
+                        "post",
+                        f"/workout-service/schedule/{workout_id}",
+                        json={"date": parsed_date},
+                    )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Se creó el entrenamiento {workout_id}, pero no se pudo programar "
+                    f"para {parsed_date}: {exc}"
+                ) from exc
+
+    return {
+        "ok": True,
+        "workout_id": workout_id,
+        "summary": summary,
+        "date": parsed_date,
+        "create_response": created,
+        "schedule_response": scheduled,
+    }
+
+
+@mcp.tool
+def update_running_workout(
+    workout_id: str,
+    name: str,
+    steps: list[dict[str, Any]],
+    description: str = "",
+    estimated_duration_seconds: int = None,
+) -> dict:
+    """Sustituye el contenido de una sesión de carrera conservando su workout_id.
+
+    El cambio afecta también a las fechas donde ese entrenamiento ya esté programado.
+    Se recomienda llamar antes a preview_running_workout con los mismos datos.
+    """
+    payload, summary = _running_workout_payload(
+        name, steps, description, estimated_duration_seconds
+    )
+    payload["workoutId"] = int(workout_id)
+    with FETCH_LOCK:
+        api = _get_api()
+        try:
+            if callable(getattr(api, "update_workout", None)):
+                response = api.update_workout(workout_id, payload)
+            else:
+                response = _garmin_transport_call(
+                    api,
+                    "put",
+                    f"/workout-service/workout/{int(workout_id)}",
+                    json=payload,
+                )
+        except Exception as exc:
+            raise RuntimeError(f"No se pudo actualizar el entrenamiento {workout_id}: {exc}") from exc
+    return {
+        "ok": True,
+        "workout_id": str(workout_id),
+        "summary": summary,
+        "response": response,
+    }
+
+
+@mcp.tool
+def delete_workout(workout_id: str) -> dict:
+    """Borra definitivamente una sesión de la biblioteca de Garmin.
+
+    No confundir con unschedule_workout, que solo quita una fecha del calendario.
+    Usa el workout_id obtenido con get_workout_library o create_running_workout.
+    """
+    parsed_id = int(workout_id)
+    if parsed_id <= 0:
+        raise ValueError("workout_id debe ser un entero positivo")
+    with FETCH_LOCK:
+        api = _get_api()
+        try:
+            if callable(getattr(api, "delete_workout", None)):
+                response = api.delete_workout(parsed_id)
+            else:
+                response = _garmin_transport_call(
+                    api, "delete", f"/workout-service/workout/{parsed_id}"
+                )
+        except Exception as exc:
+            raise RuntimeError(f"No se pudo borrar el entrenamiento {parsed_id}: {exc}") from exc
+    return {"ok": True, "workout_id": str(parsed_id), "response": response}
+
 @mcp.tool
 def get_scheduled_workouts(year: int = None, month: int = None) -> dict:
     """Entrenamientos planificados en el calendario de Garmin Connect para un mes.
