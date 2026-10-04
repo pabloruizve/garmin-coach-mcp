@@ -175,3 +175,17 @@ def test_translation_opt_out_only_for_structural_tools(srv, api):
     assert wc["sport"] == "running"  # no traducido a "Correr"
     tl = _fn(srv.get_training_load_trend)("2026-10-01", "2026-10-01")
     assert tl["trend"][0]["acwr_status"] == "Óptimo"  # las demás siguen traduciéndose
+
+
+def test_sustained_peak_discards_spikes():
+    import server
+    base = [(float(i), 150) for i in range(60)]
+    base[30] = (30.0, 199)  # pico puntual de 1 s
+    r = server._coach_sustained_peak(base, 5)
+    assert r["raw_max"] == 199
+    assert r["sustained_max"] < 165
+    assert r["spike_gap"] >= 6
+    hard = [(float(i), 150 + (i if i < 40 else 40)) for i in range(60)]
+    r2 = server._coach_sustained_peak(hard, 5)
+    assert r2["sustained_max"] == 190.0 and r2["spike_gap"] <= 1
+    assert server._coach_sustained_peak([], 5)["sustained_max"] is None

@@ -10595,6 +10595,112 @@ def get_activity_fit_messages(
     if message_offset + len(messages) < len(eligible):
         result["next_offset"] = message_offset + len(messages)
     return result
+
+import asyncio as _asyncio
+
+
+def _coach_hr_series(fit) -> list[tuple[float, int]]:
+    out: list[tuple[float, int]] = []
+    for msg in fit.get_messages("record"):
+        vals = {f.name: f.value for f in msg}
+        ts, hr = vals.get("timestamp"), vals.get("heart_rate")
+        if ts is None or not isinstance(hr, (int, float)) or hr <= 0:
+            continue
+        out.append((ts.timestamp() if hasattr(ts, "timestamp") else float(ts), int(hr)))
+    return out
+
+
+def _coach_sustained_peak(series: list[tuple[float, int]], window_s: int = 5) -> dict:
+    """Mayor media de FC en una ventana de window_s segundos (descarta picos de 1-2 s)."""
+    if not series:
+        return {"raw_max": None, "sustained_max": None, "samples": 0}
+    raw_max = max(h for _, h in series)
+    best = None
+    lo = 0
+    total = 0
+    for i, (t, h) in enumerate(series):
+        total += h
+        while t - series[lo][0] >= window_s:
+            total -= series[lo][1]
+            lo += 1
+        n = i - lo + 1
+        if n >= max(2, int(window_s * 0.6)):
+            avg = total / n
+            if best is None or avg > best:
+                best = avg
+    sustained = round(best, 1) if best is not None else None
+    return {
+        "raw_max": raw_max,
+        "sustained_max": sustained,
+        "spike_gap": round(raw_max - sustained, 1) if sustained is not None else None,
+        "samples": len(series),
+    }
+
+
+def _coach_activity_hr_peak(activity_id: int, window_s: int = 5) -> dict:
+    import fitparse  # type: ignore
+    with FETCH_LOCK:
+        api = _get_api()
+        raw = api.download_activity(int(activity_id), dl_fmt=Garmin.ActivityDownloadFormat.ORIGINAL)
+    if not raw:
+        raise RuntimeError(f"Garmin no devolvió FIT para la actividad {activity_id}.")
+    fit = fitparse.FitFile(_io.BytesIO(_coach_fit_bytes(bytes(raw))))
+    res = _coach_sustained_peak(_coach_hr_series(fit), window_s)
+    res["activity_id"] = str(activity_id)
+    res["window_s"] = window_s
+    return res
+
+
+@mcp.tool
+def get_activity_hr_peak(activity_id: str, window_s: int = 5) -> dict:
+    """Pico de FC de una actividad calculado desde los records del FIT: raw_max (puntual) y
+    sustained_max (mayor media en una ventana de window_s segundos, por defecto 5).
+    spike_gap = raw_max - sustained_max; un gap >= 6 ppm sugiere artefacto del sensor óptico."""
+    if not 2 <= window_s <= 60:
+        raise ValueError("window_s entre 2 y 60.")
+    return _coach_activity_hr_peak(int(activity_id), window_s)
+
+
+@mcp.custom_route("/hrmax/candidates", methods=["GET"])
+async def hrmax_candidates_web(request: Request) -> JSONResponse:
+    """Candidatos a FCmáx: carreras (running) del rango con maxHR de resumen >= min_hr,
+    con pico sostenido calculado desde el FIT. Para el job semanal de n8n."""
+    start_date = request.query_params.get("start_date", "").strip()
+    end_date = request.query_params.get("end_date", "").strip() or date.today().isoformat()
+    try:
+        min_hr = int(request.query_params.get("min_hr", "170"))
+        window_s = int(request.query_params.get("window_s", "5"))
+    except ValueError:
+        return JSONResponse({"error": "min_hr y window_s deben ser enteros"}, status_code=400)
+    if not start_date or not 2 <= window_s <= 60:
+        return JSONResponse({"error": "start_date (YYYY-MM-DD) obligatorio; window_s 2-60"}, status_code=400)
+    try:
+        with FETCH_LOCK:
+            api = _get_api()
+            acts = api.get_activities_by_date(start_date, end_date, None) or []
+    except Exception as exc:
+        return JSONResponse({"error": f"Garmin no disponible: {exc}"}, status_code=503)
+    out = []
+    for a in acts:
+        if not isinstance(a, dict):
+            continue
+        tk = ((a.get("activityType") or {}).get("typeKey") or "").lower()
+        mx = a.get("maxHR")
+        if "run" not in tk or not isinstance(mx, (int, float)) or mx < min_hr:
+            continue
+        row = {
+            "activity_id": a.get("activityId"),
+            "name": a.get("activityName"),
+            "date": (a.get("startTimeLocal") or "")[:10],
+            "summary_max_hr": mx,
+        }
+        try:
+            row.update(await _asyncio.to_thread(_coach_activity_hr_peak, a.get("activityId"), window_s))
+        except Exception as exc:
+            row["error"] = str(exc)
+        out.append(row)
+    out.sort(key=lambda r: (r.get("sustained_max") or 0), reverse=True)
+    return JSONResponse({"candidates": out, "count": len(out), "window_s": window_s, "min_hr": min_hr})
 # === COACH COMPACT TOOLS END ===
 
 
