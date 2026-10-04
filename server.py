@@ -10309,6 +10309,7 @@ def get_calendar_range(start_date: str, end_date: str, include_activities: bool 
                 if kind == "activity":
                     # En el calendario, duration va en ms y distance en cm.
                     row["activity_id"] = it.get("id")
+                    row["activity_type_id"] = it.get("activityTypeId")  # 1 = running
                     row["distance_km"] = round(it["distance"] / 100000, 2) if it.get("distance") else None
                     row["duration_min"] = round(it["duration"] / 60000, 1) if it.get("duration") else None
                     row["avg_hr"] = it.get("averageHR")

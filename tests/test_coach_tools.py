@@ -38,7 +38,7 @@ class FakeApi:
             (2026, 10): [
                 {"itemType": "Entrenamiento", "date": "2026-10-07", "title": "4K Cto + 8x1000 (4:30)", "workoutId": 11, "id": 99, "sportTypeKey": "running", "completed": False},
                 {"itemType": "Entrenamiento", "date": "2026-10-07", "title": "4K Cto + 8x1000 (4:30)", "workoutId": 11, "id": 99, "sportTypeKey": "running"},  # duplicado
-                {"itemType": "activity", "date": "2026-10-03", "title": "Rodaje", "id": 5, "distance": 1001115, "duration": 3300000, "averageHR": 144},
+                {"itemType": "activity", "date": "2026-10-03", "title": "Rodaje", "id": 5, "activityTypeId": 1, "distance": 1001115, "duration": 3300000, "averageHR": 144},
                 {"itemType": "goal", "date": "2026-10-01", "title": "Running octubre 2026", "id": 3},
                 {"itemType": "nap", "date": "2026-10-02", "id": None, "duration": 4860},
                 {"itemType": "Entrenamiento", "date": "2026-10-31", "title": "fuera de rango", "workoutId": 1, "id": 1},
@@ -95,7 +95,7 @@ def test_calendar_range_compact_dedup_and_months(srv, api):
 def test_calendar_range_with_activities(srv, api):
     r = _fn(srv.get_calendar_range)("2026-10-01", "2026-10-10", include_activities=True)
     act = [i for i in r["items"] if i["type"] == "activity"][0]
-    assert act["distance_km"] == 10.01 and act["duration_min"] == 55.0 and act["avg_hr"] == 144
+    assert act["distance_km"] == 10.01 and act["duration_min"] == 55.0 and act["avg_hr"] == 144 and act["activity_type_id"] == 1
     assert not [i for i in r["items"] if i["type"] in ("goal", "nap")]
 
 
