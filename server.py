@@ -350,7 +350,14 @@ mcp = FastMCP(
 if GARMIN_LANGUAGE.startswith("es"):
     _orig_mcp_tool = mcp.tool
 
+    # Tools cuya salida es estructural (tipos de mensaje FIT, itemType, claves de deporte):
+    # traducir sus VALORES rompe filtros como type == "workout". Se devuelven tal cual.
+    _NO_TRANSLATE_TOOLS = {"get_calendar_range", "get_workout_compact", "get_activity_fit_messages"}
+
     def _translating_tool(fn):
+        if getattr(fn, "__name__", "") in _NO_TRANSLATE_TOOLS:
+            return _orig_mcp_tool(fn)
+
         @functools.wraps(fn)
         def _wrapped(*args, **kwargs):
             return _translate_garmin(fn(*args, **kwargs))
@@ -10507,6 +10514,24 @@ def _coach_fit_value(v: Any) -> Any:
     return str(v)
 
 
+_FIT_INTENSITY = {0: "active", 1: "rest", 2: "warmup", 3: "cooldown", 4: "recovery", 5: "interval", 6: "other"}
+
+
+def _coach_fit_fields(msg: Any, include_nulls: bool = False) -> dict[str, Any]:
+    """Campos de un mensaje FIT como dict. Omite nulos y mapea intensity numérico."""
+    mname = str(getattr(msg, "name", None) or "")
+    out: dict[str, Any] = {}
+    for f in msg.fields:
+        value = _coach_fit_value(f.value)
+        if value is None and not include_nulls:
+            continue
+        key = f.name or f"unknown_{getattr(f, 'def_num', '?')}"
+        if mname == "workout_step" and key == "intensity" and isinstance(value, int) and not isinstance(value, bool):
+            value = _FIT_INTENSITY.get(value, value)
+        out[key] = {"value": value, "units": f.units} if f.units else value
+    return out
+
+
 @mcp.tool
 def get_activity_fit_messages(
     activity_id: str,
@@ -10514,13 +10539,15 @@ def get_activity_fit_messages(
     include_records: bool = False,
     message_offset: int = 0,
     message_limit: int = 500,
+    include_nulls: bool = False,
 ) -> dict:
     """Mensajes del FIT original de una actividad (fuente de verdad del reloj), paginados.
     Para el ritmo objetivo realmente ejecutado usa message_types ["workout","workout_step"]:
     en el FIT, custom_target_speed_low = ritmo MÁS LENTO y custom_target_speed_high = más rápido
     (orden inverso al DTO del workout). Un workout creado DESPUÉS de correr no aparece en el FIT.
     Los 'record' (1/s) se omiten salvo include_records=true; pagina con next_offset.
-    message_limit: 1-5000 (por defecto 500).
+    message_limit: 1-5000 (por defecto 500). Los campos nulos se omiten salvo include_nulls=true.
+    En workout_step, intensity numérico se traduce (4 -> recovery, etc.).
     """
     try:
         import fitparse  # type: ignore
@@ -10552,12 +10579,7 @@ def get_activity_fit_messages(
     messages = [
         {
             "type": str(getattr(m, "name", None) or "unknown"),
-            "fields": {
-                (f.name or f"unknown_{getattr(f, 'def_num', '?')}"): (
-                    {"value": _coach_fit_value(f.value), "units": f.units} if f.units else _coach_fit_value(f.value)
-                )
-                for f in m.fields
-            },
+            "fields": _coach_fit_fields(m, include_nulls),
         }
         for m in page
     ]

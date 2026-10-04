@@ -11,6 +11,7 @@ import pytest
 
 os.environ.setdefault("GARMIN_EMAIL", "x@x")
 os.environ.setdefault("GARMIN_PASSWORD", "x")
+os.environ["GARMIN_LANGUAGE"] = "es"
 SERVER = os.path.join(os.path.dirname(__file__), "..", "server.py")
 
 
@@ -87,6 +88,8 @@ def test_calendar_range_compact_dedup_and_months(srv, api):
     assert [i["date"] for i in r["items"]] == ["2026-09-30", "2026-10-07"]
     assert r["count"] == 2  # sin duplicado, sin actividad, sin fuera de rango
     assert r["items"][1]["workout_id"] == 11 and r["items"][1]["scheduled_workout_id"] == 99
+    # sin traducir: filtros por type == "workout" deben funcionar
+    assert r["items"][1]["type"] == "workout"
 
 
 def test_calendar_range_with_activities(srv, api):
@@ -143,3 +146,32 @@ def test_fit_messages_bytes_helpers(srv):
 def test_fit_messages_validates_args(srv, api):
     with pytest.raises(ValueError):
         _fn(srv.get_activity_fit_messages)("1", message_limit=0)
+
+
+class _F:
+    def __init__(self, name, value, units=None):
+        self.name, self.value, self.units = name, value, units
+
+
+class _M:
+    def __init__(self, name, fields):
+        self.name, self.fields = name, fields
+
+
+def test_fit_fields_drop_nulls_and_map_intensity(srv):
+    m = _M("workout_step", [
+        _F("duration_time", 30, "s"), _F("notes", None), _F("intensity", 4),
+        _F("pool_length", None, "m"), _F("target_type", "open"),
+    ])
+    assert srv._coach_fit_fields(m) == {"duration_time": {"value": 30, "units": "s"}, "intensity": "recovery", "target_type": "open"}
+    assert "notes" in srv._coach_fit_fields(m, include_nulls=True)
+    # un intensity ya textual no se toca, y solo se mapea en workout_step
+    assert srv._coach_fit_fields(_M("workout_step", [_F("intensity", "warmup")]))["intensity"] == "warmup"
+    assert srv._coach_fit_fields(_M("lap", [_F("intensity", 4)]))["intensity"] == 4
+
+
+def test_translation_opt_out_only_for_structural_tools(srv, api):
+    wc = _fn(srv.get_workout_compact)("1")
+    assert wc["sport"] == "running"  # no traducido a "Correr"
+    tl = _fn(srv.get_training_load_trend)("2026-10-01", "2026-10-01")
+    assert tl["trend"][0]["acwr_status"] == "Óptimo"  # las demás siguen traduciéndose
