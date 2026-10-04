@@ -10190,6 +10190,391 @@ def get_stats(target_date: str = None) -> dict:
 
 # === NEW GARMIN API TOOLS END ===
 
+# === COACH COMPACT TOOLS START ===
+# Herramientas compactas para análisis de entrenamiento, portadas de Taxuspt/garmin_mcp
+# (Apache-2.0) y adaptadas al patrón de este servidor (_get_api + FETCH_LOCK).
+# Son ADITIVAS: no tocan get_activities_in_range ni los endpoints REST que usa n8n.
+import calendar as _calendar
+import gzip as _gzip
+import io as _io
+import zipfile as _zipfile
+
+_COACH_MAX_DAYS = 90
+_COACH_WORKOUT_KINDS = {"workout", "entrenamiento", "garmincoach"}
+
+
+def _coach_parse_range(start_date: str, end_date: str, max_days: int = _COACH_MAX_DAYS) -> tuple[date, date]:
+    try:
+        start = date.fromisoformat(start_date)
+        end = date.fromisoformat(end_date)
+    except ValueError as e:
+        raise ValueError(f"Fecha inválida: {e}. Usa YYYY-MM-DD.")
+    if end < start:
+        raise ValueError("end_date debe ser igual o posterior a start_date.")
+    days = (end - start).days + 1
+    if days > max_days:
+        raise ValueError(f"Rango demasiado grande ({days} días). Máximo {max_days}.")
+    return start, end
+
+
+def _coach_months(start: date, end: date) -> list[tuple[int, int]]:
+    out: list[tuple[int, int]] = []
+    y, m = start.year, start.month
+    while (y, m) <= (end.year, end.month):
+        out.append((y, m))
+        m += 1
+        if m > 12:
+            y, m = y + 1, 1
+    return out
+
+
+def _coach_fetch_month(api: Garmin, year: int, month: int) -> list[dict]:
+    """Items crudos del calendario de un mes (month 1-12)."""
+    if hasattr(api, "get_scheduled_workouts"):
+        data = api.get_scheduled_workouts(year, month)
+    else:
+        data = api.connectapi(f"/calendar-service/year/{year}/month/{month - 1}")
+    items = data.get("calendarItems") if isinstance(data, dict) else data
+    return [i for i in (items or []) if isinstance(i, dict)]
+
+
+def _coach_pace(speed_ms: Any) -> str | None:
+    """m/s -> 'M:SS' por km."""
+    try:
+        v = float(speed_ms)
+    except (TypeError, ValueError):
+        return None
+    if v <= 0:
+        return None
+    secs = round(1000.0 / v)
+    return f"{secs // 60}:{secs % 60:02d}"
+
+
+@mcp.tool
+def get_calendar_range(start_date: str, end_date: str, include_activities: bool = False) -> dict:
+    """Calendario de Garmin Connect entre dos fechas (YYYY-MM-DD), en formato compacto.
+    Devuelve entrenamientos planificados (y carreras/eventos) ordenados por fecha, SIN el
+    volcado crudo del mes. Con include_activities=true añade también las actividades ya
+    ejecutadas del calendario. Máximo 90 días.
+    Cada entrenamiento trae workout_id (para get_workout_compact) y scheduled_workout_id.
+    Aviso: 'completed' de Garmin suele quedarse en false aunque la sesión esté corrida;
+    cruza planificado y ejecutado por fecha y nombre.
+    """
+    start, end = _coach_parse_range(start_date, end_date)
+    seen: set = set()
+    out: list[dict] = []
+    with FETCH_LOCK:
+        api = _get_api()
+        for y, m in _coach_months(start, end):
+            try:
+                items = _coach_fetch_month(api, y, m)
+            except Exception as e:
+                raise RuntimeError(f"No se pudo leer el calendario de {y}/{m:02d}: {e}")
+            for it in items:
+                day = it.get("date")
+                if not isinstance(day, str) or not (start_date <= day <= end_date):
+                    continue
+                raw_kind = (it.get("itemType") or "").lower()
+                # Garmin devuelve itemType localizado ("Entrenamiento" en cuenta en español).
+                if raw_kind == "activity":
+                    kind = "activity"
+                elif raw_kind in _COACH_WORKOUT_KINDS or it.get("workoutId"):
+                    kind = "workout"
+                elif raw_kind in ("event", "race", "evento", "carrera"):
+                    kind = "event"
+                else:
+                    continue  # goal, nap, badge, etc.
+                if kind == "activity" and not include_activities:
+                    continue
+                key = (kind, it.get("id"), it.get("workoutId"), day, it.get("title"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                row = {
+                    "date": day,
+                    "type": kind,
+                    "title": it.get("title"),
+                    "sport": it.get("sportTypeKey"),
+                    "workout_id": it.get("workoutId"),
+                    "scheduled_workout_id": it.get("id") if kind == "workout" else None,
+                    "completed": it.get("completed"),
+                }
+                if kind == "activity":
+                    # En el calendario, duration va en ms y distance en cm.
+                    row["activity_id"] = it.get("id")
+                    row["distance_km"] = round(it["distance"] / 100000, 2) if it.get("distance") else None
+                    row["duration_min"] = round(it["duration"] / 60000, 1) if it.get("duration") else None
+                    row["avg_hr"] = it.get("averageHR")
+                elif kind == "workout":
+                    row["estimated_duration_min"] = (
+                        round(it["estimatedDurationInSecs"] / 60, 1) if it.get("estimatedDurationInSecs") else None
+                    )
+                    row["estimated_distance_km"] = (
+                        round(it["estimatedDistanceInMeters"] / 1000, 2) if it.get("estimatedDistanceInMeters") else None
+                    )
+                else:
+                    row["distance_m"] = it.get("distance")
+                    row["is_race"] = it.get("isRace")
+                out.append({k: v for k, v in row.items() if v is not None})
+    out.sort(key=lambda r: (r["date"], r.get("title") or ""))
+    return {"start_date": start_date, "end_date": end_date, "count": len(out), "items": out}
+
+
+_STEP_TYPES = {1: "warmup", 2: "cooldown", 3: "interval", 4: "recovery", 5: "rest", 6: "repeat"}
+
+
+def _coach_step(step: dict) -> dict:
+    """Aplana un paso del workout DTO. En el DTO targetValueOne = ritmo MÁS RÁPIDO (m/s mayor)."""
+    stype = step.get("stepType") or {}
+    cond = step.get("endCondition") or {}
+    ttype = step.get("targetType") or {}
+    row: dict[str, Any] = {
+        "type": stype.get("stepTypeKey") or _STEP_TYPES.get(stype.get("stepTypeId")),
+    }
+    if step.get("type") == "RepeatGroupDTO" or row["type"] == "repeat":
+        row["type"] = "repeat"
+        row["iterations"] = step.get("numberOfIterations")
+        row["steps"] = [_coach_step(s) for s in (step.get("workoutSteps") or [])]
+        return row
+    ckey = cond.get("conditionTypeKey")
+    val = step.get("endConditionValue")
+    if ckey == "distance":
+        row["distance_m"] = val
+    elif ckey == "time":
+        row["duration_s"] = val
+    else:
+        row["end"] = ckey
+    tkey = ttype.get("workoutTargetTypeKey")
+    row["target"] = tkey
+    if tkey == "pace.zone":
+        row["pace_fast"] = _coach_pace(step.get("targetValueOne"))
+        row["pace_slow"] = _coach_pace(step.get("targetValueTwo"))
+    elif tkey and tkey != "no.target":
+        row["target_low"] = step.get("targetValueOne")
+        row["target_high"] = step.get("targetValueTwo")
+    return row
+
+
+@mcp.tool
+def get_workout_compact(workout_id: str) -> dict:
+    """Entrenamiento de Garmin en formato compacto: pasos aplanados con ritmo objetivo en M:SS/km
+    (pace_fast / pace_slow), distancia o duración de cada paso y repeticiones.
+    Alternativa ligera a get_workout_detail (que devuelve el DTO completo).
+    Si el entrenamiento fue borrado de la biblioteca, Garmin responde 404: usa entonces
+    get_activity_fit_messages con message_types ["workout","workout_step"] sobre la actividad.
+    """
+    with FETCH_LOCK:
+        api = _get_api()
+        try:
+            data = api.get_workout_by_id(workout_id) if hasattr(api, "get_workout_by_id") \
+                else api.connectapi(f"/workout-service/workout/{workout_id}")
+        except Exception as e:
+            raise RuntimeError(f"No se pudo obtener el entrenamiento {workout_id}: {e}")
+    segments = (data or {}).get("workoutSegments") or []
+    steps: list[dict] = []
+    for seg in segments:
+        steps.extend(_coach_step(s) for s in (seg.get("workoutSteps") or []))
+    return {
+        "workout_id": str(workout_id),
+        "name": (data or {}).get("workoutName"),
+        "sport": ((data or {}).get("sportType") or {}).get("sportTypeKey"),
+        "estimated_duration_min": round(data["estimatedDurationInSecs"] / 60, 1) if (data or {}).get("estimatedDurationInSecs") else None,
+        "estimated_distance_km": round(data["estimatedDistanceInMeters"] / 1000, 2) if (data or {}).get("estimatedDistanceInMeters") else None,
+        "steps": steps,
+    }
+
+
+def _coach_training_status_day(api: Garmin, day: str) -> dict | None:
+    data = api.get_training_status(day)
+    if not data:
+        return None
+    recent = data.get("mostRecentTrainingStatus") or {}
+    latest = recent.get("latestTrainingStatusData") or {}
+    status: dict = {}
+    for dev in latest.values():
+        if not isinstance(dev, dict):
+            continue
+        if dev.get("primaryTrainingDevice"):
+            status = dev
+            break
+        if not status:
+            status = dev
+    acute = status.get("acuteTrainingLoadDTO") or {}
+    vo2 = ((data.get("mostRecentVO2Max") or {}).get("generic") or {}).get("vo2MaxValue")
+    entry: dict[str, Any] = {"date": day}
+    atl = acute.get("dailyTrainingLoadAcute")
+    ctl = acute.get("dailyTrainingLoadChronic")
+    if atl is not None:
+        entry["atl"] = round(atl, 1)
+    if ctl is not None:
+        entry["ctl"] = round(ctl, 1)
+    if atl is not None and ctl is not None:
+        entry["tsb"] = round(ctl - atl, 1)
+    if acute.get("dailyAcuteChronicWorkloadRatio") is not None:
+        entry["acwr"] = round(acute["dailyAcuteChronicWorkloadRatio"], 2)
+    if acute.get("acwrStatus"):
+        entry["acwr_status"] = acute["acwrStatus"]
+    if status.get("trainingStatusFeedbackPhrase"):
+        entry["training_status"] = status["trainingStatusFeedbackPhrase"]
+    if vo2 is not None:
+        entry["vo2_max"] = round(vo2, 1)
+    return entry if len(entry) > 1 else None
+
+
+def _coach_status_series(start_date: str, end_date: str) -> list[dict]:
+    start, end = _coach_parse_range(start_date, end_date)
+    series: list[dict] = []
+    with FETCH_LOCK:
+        api = _get_api()
+        d = start
+        while d <= end:
+            try:
+                row = _coach_training_status_day(api, d.isoformat())
+                if row:
+                    series.append(row)
+            except Exception:
+                pass  # días sin datos
+            d += timedelta(days=1)
+    return series
+
+
+@mcp.tool
+def get_training_load_trend(start_date: str, end_date: str) -> dict:
+    """Carga de entrenamiento de Garmin por día entre dos fechas: ATL (aguda 7d), CTL (crónica 42d),
+    TSB (CTL-ATL), ACWR y estado de entreno. Máximo 90 días (1 petición a Garmin por día).
+    OJO: el ACWR de Garmin NO es comparable con el ACWR/TRIMP calculado en n8n.
+    """
+    series = _coach_status_series(start_date, end_date)
+    if not series:
+        raise RuntimeError(f"Sin datos de carga entre {start_date} y {end_date}.")
+    for r in series:
+        r.pop("vo2_max", None)
+    return {"start_date": start_date, "end_date": end_date, "days_with_data": len(series), "trend": series}
+
+
+@mcp.tool
+def get_vo2max_trend(start_date: str, end_date: str) -> dict:
+    """Tendencia de VO2max (running) por día entre dos fechas. Garmin solo recalcula tras una
+    actividad: los días intermedios arrastran el último valor (carried_forward=true).
+    Cambios <0,5 son ruido; mira la dirección a 4-6 semanas. Máximo 90 días.
+    """
+    series = _coach_status_series(start_date, end_date)
+    trend: list[dict] = []
+    last = None
+    for r in series:
+        v = r.get("vo2_max")
+        if v is None:
+            continue
+        trend.append({"date": r["date"], "vo2_max": v, "carried_forward": last is not None and v == last})
+        last = v
+    if not trend:
+        raise RuntimeError(f"Sin datos de VO2max entre {start_date} y {end_date}.")
+    return {
+        "start_date": start_date,
+        "end_date": end_date,
+        "first_vo2_max": trend[0]["vo2_max"],
+        "latest_vo2_max": trend[-1]["vo2_max"],
+        "change": round(trend[-1]["vo2_max"] - trend[0]["vo2_max"], 1),
+        "trend": trend,
+    }
+
+
+def _coach_fit_bytes(raw: bytes) -> bytes:
+    if raw[:2] == b"PK":
+        with _zipfile.ZipFile(_io.BytesIO(raw)) as zf:
+            names = [n for n in zf.namelist() if n.lower().endswith(".fit")]
+            if not names:
+                raise ValueError("El ZIP no contiene ningún .fit")
+            return zf.read(names[0])
+    if raw[:2] == b"\x1f\x8b":
+        return _gzip.decompress(raw)
+    return raw
+
+
+def _coach_fit_value(v: Any) -> Any:
+    if v is None or isinstance(v, (str, int, float, bool)):
+        return v
+    if isinstance(v, (bytes, bytearray, memoryview)):
+        return bytes(v).hex()
+    if isinstance(v, (list, tuple)):
+        return [_coach_fit_value(i) for i in v]
+    iso = getattr(v, "isoformat", None)
+    if callable(iso):
+        try:
+            return iso()
+        except (TypeError, ValueError):
+            pass
+    return str(v)
+
+
+@mcp.tool
+def get_activity_fit_messages(
+    activity_id: str,
+    message_types: list[str] | None = None,
+    include_records: bool = False,
+    message_offset: int = 0,
+    message_limit: int = 500,
+) -> dict:
+    """Mensajes del FIT original de una actividad (fuente de verdad del reloj), paginados.
+    Para el ritmo objetivo realmente ejecutado usa message_types ["workout","workout_step"]:
+    en el FIT, custom_target_speed_low = ritmo MÁS LENTO y custom_target_speed_high = más rápido
+    (orden inverso al DTO del workout). Un workout creado DESPUÉS de correr no aparece en el FIT.
+    Los 'record' (1/s) se omiten salvo include_records=true; pagina con next_offset.
+    message_limit: 1-5000 (por defecto 500).
+    """
+    try:
+        import fitparse  # type: ignore
+    except ImportError:
+        raise RuntimeError("Falta la librería fitparse (pip install fitparse).")
+    if message_offset < 0 or not 1 <= message_limit <= 5000:
+        raise ValueError("message_offset >= 0 y message_limit entre 1 y 5000.")
+    with FETCH_LOCK:
+        api = _get_api()
+        raw = api.download_activity(int(activity_id), dl_fmt=Garmin.ActivityDownloadFormat.ORIGINAL)
+    if not raw:
+        raise RuntimeError(f"Garmin no devolvió FIT para la actividad {activity_id}.")
+    fit = fitparse.FitFile(_io.BytesIO(_coach_fit_bytes(bytes(raw))))
+    selected = {t.strip().lower() for t in message_types if t and t.strip()} if message_types else None
+    counts: dict[str, int] = {}
+    eligible: list[Any] = []
+    for msg in fit.get_messages():
+        name = str(getattr(msg, "name", None) or "unknown")
+        counts[name] = counts.get(name, 0) + 1
+        lname = name.lower()
+        if lname == "record" and not (include_records and (selected is None or "record" in selected)):
+            continue
+        if selected is not None and lname not in selected:
+            continue
+        if selected is None and lname != "record" and counts[name] > 100:
+            continue  # tipos de alta frecuencia: solo con message_types explícito
+        eligible.append(msg)
+    page = eligible[message_offset:message_offset + message_limit]
+    messages = [
+        {
+            "type": str(getattr(m, "name", None) or "unknown"),
+            "fields": {
+                (f.name or f"unknown_{getattr(f, 'def_num', '?')}"): (
+                    {"value": _coach_fit_value(f.value), "units": f.units} if f.units else _coach_fit_value(f.value)
+                )
+                for f in m.fields
+            },
+        }
+        for m in page
+    ]
+    result: dict[str, Any] = {
+        "activity_id": str(activity_id),
+        "message_counts": counts,
+        "total_eligible": len(eligible),
+        "offset": message_offset,
+        "returned": len(messages),
+        "messages": messages,
+    }
+    if message_offset + len(messages) < len(eligible):
+        result["next_offset"] = message_offset + len(messages)
+    return result
+# === COACH COMPACT TOOLS END ===
+
+
 if __name__ == "__main__":
     _run_server()
 
