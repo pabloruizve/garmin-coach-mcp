@@ -11138,6 +11138,38 @@ def delete_workouts(workout_ids: list[int]) -> dict:
 # === PORTED TOOLS (Taxuspt/garmin_mcp) END ===
 
 
+# === ACTIVITY SELF-ASSESSMENT READ START ===
+_FEEL_LABELS = {0: "Muy mal", 25: "Cansado", 50: "Normal", 75: "Bien", 100: "Fuerte"}
+
+
+@mcp.tool
+def get_activity_self_assessment(activity_id: str) -> dict:
+    """Autoevaluación guardada en una actividad de Garmin Connect: esfuerzo percibido (RPE 0-10),
+    cómo te has sentido (0/25/50/75/100) y las notas. Es la lectura de lo que escriben set_perceived_effort,
+    set_activity_feel y set_activity_description. Los campos sin valorar devuelven null.
+    """
+    aid = _ported_parse_activity_id(activity_id)
+    with FETCH_LOCK:
+        api = _get_api()
+        activity = api.get_activity(aid)
+    if not isinstance(activity, dict) or not activity:
+        raise RuntimeError(f"No se encontró la actividad {aid}.")
+    summary = activity.get("summaryDTO") or {}
+    rpe_raw = summary.get("directWorkoutRpe")
+    feel_raw = summary.get("directWorkoutFeel")
+    # Garmin guarda el RPE x10; 0 es "sin valorar" (así lo borra set_perceived_effort).
+    rpe = round(rpe_raw / 10, 1) if isinstance(rpe_raw, (int, float)) and rpe_raw > 0 else None
+    return {
+        "activity_id": aid,
+        "name": activity.get("activityName"),
+        "rpe": rpe,
+        "feel": feel_raw,
+        "feel_label": _FEEL_LABELS.get(feel_raw) if feel_raw is not None else None,
+        "description": activity.get("description") or None,
+    }
+# === ACTIVITY SELF-ASSESSMENT READ END ===
+
+
 
 if __name__ == "__main__":
     _run_server()

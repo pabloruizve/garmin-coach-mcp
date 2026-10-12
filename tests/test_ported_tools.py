@@ -250,3 +250,25 @@ def test_new_tools_registered_in_mcp(srv):
         "schedule_workouts", "unschedule_workouts", "delete_workouts",
     }
     assert expected <= names
+
+
+# ---------- autoevaluación (lectura) ----------
+def test_activity_self_assessment_reads_what_the_setters_write(srv, api):
+    api.get_activity = lambda aid: {
+        "activityId": aid, "activityName": "Rodaje 14Km", "description": "Me pasé con el ritmo, soy consciente",
+        "summaryDTO": {"directWorkoutRpe": 50, "directWorkoutFeel": 75},
+    }
+    out = _fn(srv.get_activity_self_assessment)("24682709063")
+    assert out == {
+        "activity_id": 24682709063, "name": "Rodaje 14Km", "rpe": 5.0,
+        "feel": 75, "feel_label": "Bien", "description": "Me pasé con el ritmo, soy consciente",
+    }
+
+
+def test_activity_self_assessment_unset_fields_are_null(srv, api):
+    api.get_activity = lambda aid: {"activityId": aid, "activityName": "x", "description": "", "summaryDTO": {"directWorkoutRpe": 0}}
+    out = _fn(srv.get_activity_self_assessment)("1")
+    assert out["rpe"] is None and out["feel"] is None and out["feel_label"] is None and out["description"] is None
+    api.get_activity = lambda aid: {}
+    with pytest.raises(RuntimeError):
+        _fn(srv.get_activity_self_assessment)("1")
