@@ -7004,6 +7004,25 @@ def _format_execution_score(raw_activity: dict[str, Any]) -> Any:
     return None
 
 
+_SELF_ASSESSMENT_FEEL_ES = {0: "Muy mal", 25: "Cansado", 50: "Normal", 75: "Bien", 100: "Fuerte"}
+
+
+def _self_assessment_rpe(raw_summary: dict[str, Any]) -> Any:
+    """RPE 0-10 desde summaryDTO.directWorkoutRpe (Garmin lo guarda x10; 0 = sin valorar)."""
+    raw = raw_summary.get("directWorkoutRpe")
+    if isinstance(raw, (int, float)) and raw > 0:
+        return round(raw / 10, 1)
+    return None
+
+
+def _self_assessment_feel(raw_summary: dict[str, Any]) -> Any:
+    """Sensación desde summaryDTO.directWorkoutFeel (0/25/50/75/100); None = sin valorar."""
+    raw = raw_summary.get("directWorkoutFeel")
+    if raw is None:
+        return None
+    return _SELF_ASSESSMENT_FEEL_ES.get(raw, raw)
+
+
 def _visible_metrics_endurance_full(bundle: dict[str, Any]) -> dict[str, Any]:
     summary = bundle.get("summary") or {}
     raw_summary = _raw_summary_from_bundle(bundle).get("summaryDTO") or {}
@@ -7058,8 +7077,8 @@ def _visible_metrics_endurance_full(bundle: dict[str, Any]) -> dict[str, Any]:
             "Puntuación": _format_execution_score(raw_activity),
         },
         "Autoevaluación": {
-            "Cómo te has sentido": raw_activity.get("userFeedback") or raw_activity.get("feel") or raw_activity.get("perceivedExerciseFeedback"),
-            "Nivel de esfuerzo percibido": raw_activity.get("perceivedExerciseIntensity") or raw_activity.get("rpe") or raw_activity.get("userRpe"),
+            "Cómo te has sentido": _self_assessment_feel(_raw_summary_from_bundle(bundle)),
+            "Nivel de esfuerzo percibido": _self_assessment_rpe(_raw_summary_from_bundle(bundle)),
         },
         "Energía disponible": {
             "Potencial inicial": summary.get("beginPotentialStamina"),
