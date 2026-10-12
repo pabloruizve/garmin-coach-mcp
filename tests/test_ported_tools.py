@@ -272,3 +272,19 @@ def test_activity_self_assessment_unset_fields_are_null(srv, api):
     api.get_activity = lambda aid: {}
     with pytest.raises(RuntimeError):
         _fn(srv.get_activity_self_assessment)("1")
+
+
+# ---------- Autoevaluación en get_activity_visible_profile ----------
+def test_visible_profile_self_assessment_uses_summarydto_keys(srv):
+    bundle = {"summary": {}, "raw_payloads": {"activity_raw": {"summaryDTO": {"directWorkoutRpe": 50, "directWorkoutFeel": 75}}}}
+    out = srv._visible_metrics_endurance_full(bundle)
+    assert out["Autoevaluación"] == {"Cómo te has sentido": "Bien", "Nivel de esfuerzo percibido": 5.0}
+
+
+def test_visible_profile_self_assessment_unset_and_zero_feel(srv):
+    unset = srv._visible_metrics_endurance_full({"summary": {}, "raw_payloads": {"activity_raw": {"summaryDTO": {"directWorkoutRpe": 0}}}})
+    # sin valorar: la función descarta las secciones vacías, así que no aparece
+    assert "Autoevaluación" not in unset
+    # feel 0 ("Muy mal") es un valor válido y no debe confundirse con "sin valorar"
+    bad = srv._visible_metrics_endurance_full({"summary": {}, "raw_payloads": {"activity_raw": {"summaryDTO": {"directWorkoutFeel": 0}}}})
+    assert bad["Autoevaluación"]["Cómo te has sentido"] == "Muy mal"
