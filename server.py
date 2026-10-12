@@ -10704,6 +10704,441 @@ async def hrmax_candidates_web(request: Request) -> JSONResponse:
 # === COACH COMPACT TOOLS END ===
 
 
+# === PORTED TOOLS (Taxuspt/garmin_mcp) START ===
+# Herramientas portadas desde github.com/Taxuspt/garmin_mcp (MIT) y adaptadas al estilo de este servidor:
+# @mcp.tool síncrono, _get_api() bajo FETCH_LOCK y errores como RuntimeError.
+# Las que ESCRIBEN en la cuenta de Garmin (set_*, schedule_workouts, unschedule_workouts, delete_workouts)
+# se pueden desactivar sin tocar código con GARMIN_DISABLE_PORTED_WRITES=1 (se registran pero devuelven error).
+
+_PORTED_WRITES_DISABLED = os.environ.get("GARMIN_DISABLE_PORTED_WRITES", "").strip().lower() in {"1", "true", "yes", "si", "sí"}
+_HEART_RATE_ZONES_URL = "/biometric-service/heartRateZones"
+
+
+def _ported_check_writes() -> None:
+    if _PORTED_WRITES_DISABLED:
+        raise RuntimeError("Las herramientas de escritura portadas están desactivadas (GARMIN_DISABLE_PORTED_WRITES=1).")
+
+
+def _ported_parse_activity_id(activity_id: Any) -> int:
+    try:
+        return int(str(activity_id).strip())
+    except (TypeError, ValueError):
+        raise ValueError(f"activity_id no válido: {activity_id!r}")
+
+
+def _ported_put_activity(api: Garmin, activity_id: int, payload: dict[str, Any]) -> Any:
+    """PUT parcial sobre el ActivityDTO (solo los campos que se quieren cambiar)."""
+    url = f"{api.garmin_connect_activity}/{activity_id}"
+    return _garmin_transport_call(api, "put", url, json={"activityId": activity_id, **payload})
+
+
+def _ported_date_range(start_date: str, end_date: str, max_days: int) -> tuple[date, date, int]:
+    start = date.fromisoformat(start_date)
+    end = date.fromisoformat(end_date)
+    days = (end - start).days + 1
+    if days < 1:
+        raise ValueError("end_date debe ser igual o posterior a start_date.")
+    if days > max_days:
+        raise ValueError(f"Rango demasiado grande ({days} días). Máximo {max_days}.")
+    return start, end, days
+
+
+@mcp.tool
+def set_perceived_effort(activity_id: str, rpe: float) -> dict:
+    """Escribe el esfuerzo percibido (RPE, escala 0-10) de una actividad en Garmin Connect.
+    0 borra la valoración. Garmin lo guarda multiplicado por 10 (RPE 7 -> 70); la conversión es automática.
+    ESCRIBE en tu cuenta de Garmin.
+    """
+    _ported_check_writes()
+    aid = _ported_parse_activity_id(activity_id)
+    rpe = float(rpe)
+    if not 0 <= rpe <= 10:
+        raise ValueError("rpe debe estar entre 0 y 10.")
+    with FETCH_LOCK:
+        api = _get_api()
+        _ported_put_activity(api, aid, {"summaryDTO": {"directWorkoutRpe": int(round(rpe * 10))}})
+    return {"ok": True, "activity_id": aid, "rpe": rpe}
+
+
+@mcp.tool
+def set_activity_feel(activity_id: str, feel: int) -> dict:
+    """Escribe cómo te has sentido en una actividad ('¿Cómo te has sentido?').
+    feel: 0 = muy cansado/mal, 25 = cansado, 50 = normal, 75 = bien, 100 = fuerte.
+    ESCRIBE en tu cuenta de Garmin.
+    """
+    _ported_check_writes()
+    aid = _ported_parse_activity_id(activity_id)
+    feel = int(feel)
+    if feel not in (0, 25, 50, 75, 100):
+        raise ValueError("feel debe ser uno de 0, 25, 50, 75, 100.")
+    with FETCH_LOCK:
+        api = _get_api()
+        _ported_put_activity(api, aid, {"summaryDTO": {"directWorkoutFeel": feel}})
+    return {"ok": True, "activity_id": aid, "feel": feel}
+
+
+@mcp.tool
+def set_activity_name(activity_id: str, activity_name: str) -> dict:
+    """Cambia el nombre de una actividad en Garmin Connect. ESCRIBE en tu cuenta de Garmin."""
+    _ported_check_writes()
+    aid = _ported_parse_activity_id(activity_id)
+    name = (activity_name or "").strip()
+    if not name:
+        raise ValueError("El nombre de la actividad no puede estar vacío.")
+    with FETCH_LOCK:
+        api = _get_api()
+        _ported_put_activity(api, aid, {"activityName": name})
+    return {"ok": True, "activity_id": aid, "activity_name": name}
+
+
+@mcp.tool
+def set_activity_description(activity_id: str, description: str) -> dict:
+    """Escribe las notas (descripción) de una actividad en Garmin Connect: sensaciones, molestias, condiciones.
+    Cadena vacía borra las notas existentes. ESCRIBE en tu cuenta de Garmin.
+    """
+    _ported_check_writes()
+    aid = _ported_parse_activity_id(activity_id)
+    with FETCH_LOCK:
+        api = _get_api()
+        _ported_put_activity(api, aid, {"description": description or ""})
+    return {"ok": True, "activity_id": aid, "description": description or ""}
+
+
+@mcp.tool
+def get_heart_rate_zones(sport: str = None) -> dict:
+    """Zonas de frecuencia cardiaca guardadas en Garmin Connect (FC máx, FC en reposo, FC de umbral y límites de zona).
+    Garmin guarda un perfil DEFAULT y perfiles por deporte (RUNNING, CYCLING...). Sin 'sport' devuelve todos.
+    Útil para comparar la configuración del reloj con el sistema de 3 zonas del análisis.
+    """
+    with FETCH_LOCK:
+        api = _get_api()
+        zones = api.connectapi(_HEART_RATE_ZONES_URL)
+    if not isinstance(zones, list) or not zones:
+        raise RuntimeError("Garmin no devolvió zonas de FC configuradas.")
+    if sport is None:
+        return {"profiles": zones}
+    key = str(sport).strip().upper()
+    if key == "GENERIC":
+        key = "DEFAULT"
+    chosen = next((z for z in zones if isinstance(z, dict) and str(z.get("sport", "")).upper() == key), None)
+    if chosen is None:
+        raise RuntimeError(f"No hay zonas de FC configuradas para el deporte {key}.")
+    return {"profile": chosen}
+
+
+@mcp.tool
+def get_weekly_intensity_minutes(end_date: str = None, weeks: int = 4) -> dict:
+    """Minutos de intensidad semanales (moderados y vigorosos) y objetivo semanal de Garmin.
+    end_date: YYYY-MM-DD (por defecto hoy). weeks: número de semanas hacia atrás (1-52, por defecto 4).
+    'total_minutes' cuenta los vigorosos doble, igual que Garmin.
+    """
+    weeks = max(1, min(int(weeks), 52))
+    end = _parse_date(end_date)
+    start = (date.fromisoformat(end) - timedelta(days=weeks * 7 - 1)).isoformat()
+    with FETCH_LOCK:
+        api = _get_api()
+        data = api.get_weekly_intensity_minutes(start, end)
+    if not data:
+        raise RuntimeError(f"Sin minutos de intensidad semanales entre {start} y {end}.")
+    rows = []
+    for w in data:
+        mod = w.get("moderateValue")
+        vig = w.get("vigorousValue")
+        rows.append({
+            "week_start": w.get("calendarDate"),
+            "weekly_goal": w.get("weeklyGoal"),
+            "moderate_minutes": mod,
+            "vigorous_minutes": vig,
+            "total_minutes": (mod or 0) + 2 * (vig or 0) if (mod is not None or vig is not None) else None,
+        })
+    return {"start_date": start, "end_date": end, "weeks": rows}
+
+
+@mcp.tool
+def get_running_tolerance_trend(start_date: str, end_date: str, aggregation: str = "weekly") -> dict:
+    """Tolerancia de carrera de Garmin: capacidad de carga actual (tolerance_km), carga aguda ajustada por
+    intensidad (acute_load_km), distancia real (distance_km) y load_ratio (carga/distancia: cuánto encarece
+    cada km la intensidad). Se mueve despacio: importa la trayectoria, no el día suelto.
+    aggregation: 'weekly' (por defecto, máx 366 días) o 'daily' (máx 90 días). Complementa, no sustituye, al ACWR de n8n.
+    """
+    if aggregation not in ("daily", "weekly"):
+        raise ValueError("aggregation debe ser 'daily' o 'weekly'.")
+    _ported_date_range(start_date, end_date, 90 if aggregation == "daily" else 366)
+    with FETCH_LOCK:
+        api = _get_api()
+        data = api.get_running_tolerance(start_date, end_date, aggregation=aggregation)
+    if not data:
+        raise RuntimeError("Tu dispositivo no ofrece esta métrica o no hay datos en el rango.")
+    trend = []
+    for e in data:
+        if aggregation == "daily":
+            tol, load, dist = e.get("acuteTolerance"), e.get("acuteImpactLoad"), e.get("acuteDistance")
+        else:
+            tol, load, dist = e.get("tolerance"), e.get("totalImpactLoad"), e.get("totalDistance")
+        p: dict[str, Any] = {"date": e.get("calendarDate")}
+        if tol is not None:
+            p["tolerance_km"] = round(tol / 1000, 2)
+        if load is not None:
+            p["acute_load_km"] = round(load / 1000, 2)
+        if dist is not None:
+            p["distance_km"] = round(dist / 1000, 2)
+        if load is not None and dist:
+            p["load_ratio"] = round(load / dist, 2)
+        if aggregation == "daily":
+            if e.get("runningToleranceFeedBackPhrase"):
+                p["feedback_phrase"] = e["runningToleranceFeedBackPhrase"]
+        else:
+            for src, dst in (("startOfWeek", "start_of_week"), ("endOfWeek", "end_of_week"), ("weekIndex", "week_index")):
+                if e.get(src) is not None:
+                    p[dst] = e[src]
+        trend.append(p)
+    trend.sort(key=lambda p: p.get("date") or "")
+    tols = [p["tolerance_km"] for p in trend if "tolerance_km" in p]
+    return {
+        "start_date": start_date,
+        "end_date": end_date,
+        "aggregation": aggregation,
+        "first_tolerance_km": tols[0] if tols else None,
+        "latest_tolerance_km": tols[-1] if tols else None,
+        "tolerance_change_km": round(tols[-1] - tols[0], 2) if len(tols) >= 2 else None,
+        "trend": trend,
+    }
+
+
+@mcp.tool
+def get_hrv_trend(start_date: str, end_date: str) -> dict:
+    """Tendencia de VFC (variabilidad de la FC) por noche: media de la última noche, media semanal, pico de 5 min,
+    estado y comentario de Garmin. Una noche suelta es ruido: mira desplazamientos de la línea base.
+    Máximo 30 días (1 petición a Garmin por día). Recomendado: 7-21 días.
+    """
+    start, end, days = _ported_date_range(start_date, end_date, 30)
+    trend = []
+    with FETCH_LOCK:
+        api = _get_api()
+        for i in range(days):
+            d = (start + timedelta(days=i)).isoformat()
+            try:
+                data = api.get_hrv_data(d)
+            except Exception:
+                continue
+            summary = (data or {}).get("hrvSummary") or {}
+            row: dict[str, Any] = {"date": d}
+            for src, dst in (
+                ("lastNightAvg", "last_night_avg_ms"),
+                ("weeklyAvg", "weekly_avg_ms"),
+                ("lastNight5MinHigh", "last_night_5min_high_ms"),
+            ):
+                if summary.get(src) is not None:
+                    row[dst] = round(summary[src], 1)
+            if summary.get("status"):
+                row["status"] = summary["status"]
+            if summary.get("feedbackPhrase"):
+                row["feedback"] = summary["feedbackPhrase"]
+            if len(row) > 1:
+                trend.append(row)
+    if not trend:
+        raise RuntimeError(f"Sin datos de VFC entre {start_date} y {end_date}.")
+    vals = [r["last_night_avg_ms"] for r in trend if "last_night_avg_ms" in r]
+    return {
+        "start_date": start_date,
+        "end_date": end_date,
+        "days_with_data": len(trend),
+        "period_avg_ms": round(sum(vals) / len(vals), 1) if vals else None,
+        "trend": trend,
+    }
+
+
+@mcp.tool
+def get_training_load_balance(target_date: str = None) -> dict:
+    """Enfoque de carga de Garmin (Load Focus): reparto de la carga del último mes entre aeróbico bajo,
+    aeróbico alto y anaeróbico, con el rango objetivo de cada banda y 'status' below/within/above.
+    Incluye el comentario de Garmin (p. ej. AEROBIC_HIGH_SHORTAGE, BALANCED). Fecha YYYY-MM-DD (por defecto hoy).
+    """
+    parsed = _parse_date(target_date)
+    with FETCH_LOCK:
+        api = _get_api()
+        data = api.get_training_status(parsed)
+    lb = (data or {}).get("mostRecentTrainingLoadBalance") or {}
+    dev_map = lb.get("metricsTrainingLoadBalanceDTOMap") or {}
+    chosen: dict[str, Any] = {}
+    for dev in dev_map.values():
+        if not isinstance(dev, dict):
+            continue
+        if dev.get("primaryTrainingDevice"):
+            chosen = dev
+            break
+        if not chosen:
+            chosen = dev
+    if not chosen:
+        raise RuntimeError(f"Sin enfoque de carga para {parsed}.")
+
+    def band(load_key: str) -> dict[str, Any] | None:
+        load = chosen.get(load_key)
+        tmin = chosen.get(f"{load_key}TargetMin")
+        tmax = chosen.get(f"{load_key}TargetMax")
+        if load is None and tmin is None and tmax is None:
+            return None
+        b: dict[str, Any] = {}
+        if load is not None:
+            b["load"] = round(load, 1)
+        if tmin is not None:
+            b["target_min"] = tmin
+        if tmax is not None:
+            b["target_max"] = tmax
+        if load is not None and tmin is not None and tmax is not None:
+            b["status"] = "below" if load < tmin else "above" if load > tmax else "within"
+        return b
+
+    out: dict[str, Any] = {"date": chosen.get("calendarDate", parsed)}
+    if chosen.get("trainingBalanceFeedbackPhrase"):
+        out["feedback"] = chosen["trainingBalanceFeedbackPhrase"]
+    for name, key in (("aerobic_low", "monthlyLoadAerobicLow"), ("aerobic_high", "monthlyLoadAerobicHigh"), ("anaerobic", "monthlyLoadAnaerobic")):
+        b = band(key)
+        if b:
+            out[name] = b
+    return out
+
+
+@mcp.tool
+def get_activity_typed_splits(activity_id: str) -> dict:
+    """Parciales tipados de una actividad (calentamiento, intervalo activo, descanso, enfriamiento...).
+    Útil para analizar series sin mezclar los tramos de recuperación con los de trabajo.
+    """
+    aid = _ported_parse_activity_id(activity_id)
+    with FETCH_LOCK:
+        api = _get_api()
+        data = api.get_activity_typed_splits(aid)
+    if not data:
+        raise RuntimeError(f"Sin parciales tipados para la actividad {aid}.")
+    return {"activity_id": aid, "typed_splits": data}
+
+
+@mcp.tool
+def get_garmin_coach_workouts(calendar_date: str = None) -> dict:
+    """Entrenos del plan activo de Garmin Coach / plan de entrenamiento alrededor de una fecha (semana del día dado):
+    plan, fecha, deporte, duración, estado de completado, descansos, carreras y tipo/intención del entreno.
+    Los planes adaptativos solo exponen la ventana que Garmin ha generado (normalmente la semana actual).
+    Para ver el detalle de un entreno usa get_workout_detail con workout_uuid o workout_id.
+    """
+    parsed = _parse_date(calendar_date)
+    query = {
+        "query": (
+            f'query{{trainingPlanScalar(calendarDate:"{parsed}", '
+            f'lang:"en-US", firstDayOfWeek:"monday")}}'
+        )
+    }
+    with FETCH_LOCK:
+        api = _get_api()
+        result = api.query_garmin_graphql(query)
+    plan_data = ((result or {}).get("data") or {}).get("trainingPlanScalar") or {} if isinstance(result, dict) else {}
+    plans = plan_data.get("trainingPlanWorkoutScheduleDTOS") or []
+    if not isinstance(plans, list) or not plans:
+        raise RuntimeError(f"No hay entrenos de plan Garmin Coach para {parsed}.")
+    workouts: list[dict[str, Any]] = []
+    plan_names: list[str] = []
+    for plan in plans:
+        if not isinstance(plan, dict):
+            continue
+        if plan.get("planName") and plan["planName"] not in plan_names:
+            plan_names.append(plan["planName"])
+        for w in plan.get("workoutScheduleSummaries") or []:
+            if not isinstance(w, dict):
+                continue
+            done = bool(w.get("associatedActivityId"))
+            item = {
+                "date": w.get("scheduleDate"),
+                "workout_id": w.get("workoutId"),
+                "workout_uuid": w.get("workoutUuid"),
+                "name": w.get("workoutName"),
+                "sport": w.get("workoutType"),
+                "completed": done,
+                "training_plan": w.get("tpPlanName"),
+                "workout_type": w.get("workoutPhrase"),
+                "is_rest_day": True if w.get("isRestDay") else None,
+                "is_race_day": True if w.get("race") else None,
+                "estimated_duration_seconds": w.get("estimatedDurationInSecs") or None,
+                "estimated_distance_meters": w.get("estimatedDistanceInMeters") or None,
+                "activity_id": w.get("associatedActivityId") if done else None,
+            }
+            workouts.append({k: v for k, v in item.items() if v is not None})
+    return {"date": parsed, "training_plans": plan_names or None, "count": len(workouts), "workouts": workouts}
+
+
+@mcp.tool
+def schedule_workouts(schedules: list[dict]) -> dict:
+    """Planifica varios entrenos de la biblioteca de una vez (p. ej. la semana entera).
+    schedules: lista de {"workout_id": ..., "calendar_date": "YYYY-MM-DD"}.
+    Garmin NO es idempotente: planificar dos veces el mismo entreno el mismo día crea dos entradas.
+    Antes de repetir una llamada revisa get_scheduled_workouts. Un fallo en un elemento no cancela los demás.
+    ESCRIBE en tu calendario de Garmin.
+    """
+    _ported_check_writes()
+    if not isinstance(schedules, list) or not schedules:
+        raise ValueError("schedules debe ser una lista no vacía.")
+    results = []
+    with FETCH_LOCK:
+        api = _get_api()
+        for item in schedules:
+            wid = (item or {}).get("workout_id")
+            cdate = (item or {}).get("calendar_date")
+            try:
+                if wid is None or not cdate:
+                    raise ValueError("faltan workout_id o calendar_date")
+                parsed = date.fromisoformat(str(cdate)).isoformat()
+                if hasattr(api, "schedule_workout"):
+                    resp = api.schedule_workout(wid, parsed)
+                else:
+                    resp = _garmin_transport_call(api, "post", f"/workout-service/schedule/{wid}", json={"date": parsed})
+                results.append({"ok": True, "workout_id": wid, "date": parsed, "response": resp})
+            except Exception as exc:
+                results.append({"ok": False, "workout_id": wid, "date": cdate, "error": str(exc)})
+    return {"scheduled": sum(1 for r in results if r["ok"]), "failed": sum(1 for r in results if not r["ok"]), "results": results}
+
+
+@mcp.tool
+def unschedule_workouts(scheduled_workout_ids: list[int]) -> dict:
+    """Quita varios entrenos del calendario de Garmin. Cada id es el de la ENTRADA del calendario
+    (scheduledWorkoutId de get_scheduled_workouts), no el id del entreno. Las plantillas de la biblioteca no se tocan.
+    ESCRIBE en tu calendario de Garmin.
+    """
+    _ported_check_writes()
+    if not isinstance(scheduled_workout_ids, list) or not scheduled_workout_ids:
+        raise ValueError("scheduled_workout_ids debe ser una lista no vacía.")
+    results = []
+    with FETCH_LOCK:
+        api = _get_api()
+        for sid in scheduled_workout_ids:
+            try:
+                api.unschedule_workout(sid)
+                results.append({"ok": True, "scheduled_workout_id": sid})
+            except Exception as exc:
+                results.append({"ok": False, "scheduled_workout_id": sid, "error": str(exc)})
+    return {"removed": sum(1 for r in results if r["ok"]), "failed": sum(1 for r in results if not r["ok"]), "results": results}
+
+
+@mcp.tool
+def delete_workouts(workout_ids: list[int]) -> dict:
+    """Borra varios entrenos de la biblioteca de Garmin Connect de forma PERMANENTE (ids de get_workout_library).
+    Los entrenos ya planificados en el calendario pueden quedar huérfanos: quítalos antes con unschedule_workouts.
+    ESCRIBE en tu cuenta de Garmin.
+    """
+    _ported_check_writes()
+    if not isinstance(workout_ids, list) or not workout_ids:
+        raise ValueError("workout_ids debe ser una lista no vacía.")
+    results = []
+    with FETCH_LOCK:
+        api = _get_api()
+        for wid in workout_ids:
+            try:
+                api.delete_workout(wid)
+                results.append({"ok": True, "workout_id": wid})
+            except Exception as exc:
+                results.append({"ok": False, "workout_id": wid, "error": str(exc)})
+    return {"deleted": sum(1 for r in results if r["ok"]), "failed": sum(1 for r in results if not r["ok"]), "results": results}
+# === PORTED TOOLS (Taxuspt/garmin_mcp) END ===
+
+
+
 if __name__ == "__main__":
     _run_server()
 
