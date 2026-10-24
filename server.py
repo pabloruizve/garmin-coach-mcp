@@ -11308,7 +11308,12 @@ def get_recovery_time_remaining(target_date: str = None) -> dict:
         "date": parsed,
         "remaining_hours": None,
         "state": "no_disponible",
-        "message": "Garmin no publicó ningún dato de recuperación para este día; la estimación por actividades solo existe para hoy.",
+        "message": (
+            "Garmin no publicó ningún dato de recuperación para este día; la estimación por actividades solo existe para hoy."
+            if parsed != _now_local().date().isoformat() else
+            "Sin Predisposición para entrenar y las actividades recientes no traen recoveryTime (el Forerunner 255 muestra la "
+            "recuperación en el reloj pero no la publica en Connect), así que no hay forma de estimarla."
+        ),
     }
 
 

@@ -161,7 +161,10 @@ def test_recovery_estimate_from_activities_today_only(srv, api, monkeypatch):
     assert out["value_type"] == "estimate" and out["source"] == "recent_activity"
     assert 20 < out["remaining_hours"] < 25
     past = _fn(srv.get_recovery_time_remaining)("2026-10-20")
-    assert past["remaining_hours"] is None and past["state"] == "no_disponible"
+    assert past["remaining_hours"] is None and past["state"] == "no_disponible" and "solo existe para hoy" in past["message"]
+    api.activities = [{"activityId": 2, "recoveryTime": None, "beginTimestamp": start.timestamp() * 1000, "duration": 3500}]
+    today_empty = _fn(srv.get_recovery_time_remaining)("2026-10-24")
+    assert today_empty["state"] == "no_disponible" and "Forerunner 255" in today_empty["message"]
 
 
 def test_calendar_events_filters_and_curates(srv, api):
