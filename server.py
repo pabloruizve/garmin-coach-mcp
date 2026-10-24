@@ -10872,6 +10872,14 @@ def get_time_in_zones(
 _CA_PLANNED_KINDS = _COACH_WORKOUT_KINDS
 
 
+_CA_EASY_WORDS = ("rodaje", "regenerativ", "suave", "fácil", "facil", "recuperaci")
+
+
+def _ca_planned_easy(titles: list[str] | None) -> bool:
+    """True si TODO lo planificado ese día es un rodaje suave/regenerativo."""
+    return bool(titles) and all(any(w in str(t).lower() for w in _CA_EASY_WORDS) for t in titles)
+
+
 def _ca_is_hard(act: dict[str, Any]) -> bool:
     label = str(act.get("trainingEffectLabel") or "").upper()
     aer, ana = _ca_num(act.get("aerobicTrainingEffect")), _ca_num(act.get("anaerobicTrainingEffect"))
@@ -10883,7 +10891,9 @@ def get_weekly_summary(week_start: str = None, weeks: int = 1) -> dict:
     """Resumen compacto de una o varias semanas lunes-domingo de running: km, minutos, carga, sesiones, sesiones duras,
     días de descanso, días mínimos entre sesiones duras y, por día, lo PLANIFICADO en el calendario frente a lo EJECUTADO.
     week_start: cualquier fecha YYYY-MM-DD (se normaliza a su lunes); por defecto la semana actual. weeks: 1-12.
-    Sesión dura = etiqueta TEMPO/UMBRAL/VO2MAX/capacidad anaeróbica, o efecto aeróbico >= 4,0, o anaeróbico >= 2,0:
+    Si lo planificado ese día es un rodaje (rodaje/regenerativo/suave), la sesión NUNCA cuenta como dura aunque Garmin
+    la etiquete TEMPO (se marca garmin_says_hard para señalar que fue demasiado intensa para lo pautado).
+    Sin plan ese día: sesión dura = etiqueta TEMPO/UMBRAL/VO2MAX/capacidad anaeróbica, o efecto aeróbico >= 4,0, o anaeróbico >= 2,0:
     una sesión planificada como rodaje puede salir dura (Garmin la clasifica por lo que hiciste, no por lo que tocaba).
     Es la lectura previa que pide pauta-entrenamiento antes de pautar una semana nueva.
     """
@@ -10914,13 +10924,17 @@ def get_weekly_summary(week_start: str = None, weeks: int = 1) -> dict:
         wacts = sorted((a for a in acts if _ca_day(a) in days), key=lambda a: str(a.get("startTimeLocal") or ""))
         sessions = []
         for a in wacts:
+            garmin_hard = _ca_is_hard(a)
+            hard = garmin_hard and not _ca_planned_easy(planned.get(_ca_day(a)))
             dist, dur, spd = _ca_num(a.get("distance")) or 0.0, _ca_num(a.get("duration")) or 0.0, _ca_num(a.get("averageSpeed"))
             sessions.append({
                 "date": _ca_day(a), "name": a.get("activityName"), "km": round(dist / 1000, 2), "min": round(dur / 60, 1),
                 "pace": _coach_pace(spd), "avg_hr": _ca_num(a.get("averageHR")),
                 "te_aerobic": round(_ca_num(a.get("aerobicTrainingEffect")) or 0, 1), "te_anaerobic": round(_ca_num(a.get("anaerobicTrainingEffect")) or 0, 1),
-                "load": round(_ca_num(a.get("activityTrainingLoad")) or 0, 1), "label": a.get("trainingEffectLabel"), "hard": _ca_is_hard(a),
+                "load": round(_ca_num(a.get("activityTrainingLoad")) or 0, 1), "label": a.get("trainingEffectLabel"), "hard": hard,
             })
+            if garmin_hard and not hard:
+                sessions[-1]["garmin_says_hard"] = True
         run_days = sorted({s["date"] for s in sessions})
         hard_days = sorted({s["date"] for s in sessions if s["hard"]})
         gaps = [(date.fromisoformat(b) - date.fromisoformat(a)).days for a, b in zip(hard_days, hard_days[1:])]
@@ -10935,7 +10949,7 @@ def get_weekly_summary(week_start: str = None, weeks: int = 1) -> dict:
             "planned_vs_executed": plan_vs, "unplanned_executed": [d for d in run_days if d not in planned],
             "per_session": sessions,
         })
-    return {"criterio_dura": "etiqueta TEMPO/UMBRAL/VO2MAX/anaeróbica, o TE aeróbico >= 4,0, o anaeróbico >= 2,0", "weeks": out_weeks}
+    return {"criterio_dura": "lo planificado como rodaje nunca es dura; si no, etiqueta TEMPO/UMBRAL/VO2MAX/anaeróbica, o TE aeróbico >= 4,0, o anaeróbico >= 2,0", "weeks": out_weeks}
 
 
 def _ca_drift(recs: list[tuple[float, int, float | None]], skip_pct: float) -> dict[str, Any]:

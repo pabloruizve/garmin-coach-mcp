@@ -104,6 +104,7 @@ def test_weekly_summary(srv, monkeypatch):
     ]
     items = [
         {"itemType": "Entrenamiento", "date": "2026-10-20", "title": "Rodaje", "workoutId": 1},
+        {"itemType": "Entrenamiento", "date": "2026-10-24", "title": "Rodaje 10K", "workoutId": 4},
         {"itemType": "Entrenamiento", "date": "2026-10-22", "title": "Tempo", "workoutId": 2},
         {"itemType": "activity", "date": "2026-10-24", "title": "Tempo", "workoutId": 3},
     ]
@@ -111,13 +112,15 @@ def test_weekly_summary(srv, monkeypatch):
     r = _fn(srv.get_weekly_summary)("2026-10-22")
     w = r["weeks"][0]
     assert w["week_start"] == "2026-10-19" and w["week_end"] == "2026-10-25"
-    assert w["sessions"] == 3 and w["hard_sessions"] == 2
-    assert w["hard_dates"] == ["2026-10-21", "2026-10-24"] and w["min_days_between_hard"] == 3
+    # el 24 Garmin dice TEMPO pero estaba planificado un rodaje: nunca cuenta como dura
+    assert w["sessions"] == 3 and w["hard_sessions"] == 1
+    assert w["hard_dates"] == ["2026-10-21"] and w["min_days_between_hard"] is None
+    assert [s for s in w["per_session"] if s["date"] == "2026-10-24"][0]["garmin_says_hard"] is True
     assert w["load"] == 350.0
     assert "2026-10-23" in w["rest_days"]
     pv = {p["date"]: p for p in w["planned_vs_executed"]}
     assert pv["2026-10-20"]["done"] is True and pv["2026-10-22"]["done"] is False
-    assert "2026-10-24" not in pv and "2026-10-21" in w["unplanned_executed"]
+    assert pv["2026-10-24"]["done"] is True and "2026-10-21" in w["unplanned_executed"]
 
 
 def test_weekly_summary_validates_weeks(srv):
