@@ -11154,6 +11154,593 @@ def delete_workouts(workout_ids: list[int]) -> dict:
             except Exception as exc:
                 results.append({"ok": False, "workout_id": wid, "error": str(exc)})
     return {"deleted": sum(1 for r in results if r["ok"]), "failed": sum(1 for r in results if not r["ok"]), "results": results}
+
+
+# --- Segunda tanda portada de Taxuspt/garmin_mcp (MIT) ---
+_CM_PER_MS_TO_MPS = 10  # Connect guarda la velocidad del umbral de lactato en cm/ms
+_EVENT_DISTANCE_UNIT_TO_M = {"meter": 1.0, "kilometer": 1000.0, "yard": 0.9144, "mile": 1609.344}
+
+
+def _ported2_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _ported2_hours(minutes: Any, phrase: Any = None) -> float | None:
+    if phrase == "REACHED_ZERO":
+        return 0.0
+    if isinstance(minutes, bool) or not isinstance(minutes, (int, float)) or minutes < 0:
+        return None
+    return round(float(minutes) / 60.0, 1)
+
+
+def _ported2_recovery_state(hours: float | None, phrase: Any = None) -> str:
+    if phrase == "REACHED_ZERO" or hours == 0:
+        return "recuperado"
+    if hours is None:
+        return "desconocido"
+    if hours <= 6:
+        return "casi_recuperado"
+    if hours <= 24:
+        return "recuperando"
+    return "sin_recuperar"
+
+
+def _ported2_snapshots(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [p for p in payload if isinstance(p, dict)]
+    return [payload] if isinstance(payload, dict) and payload else []
+
+
+def _ported2_recovery_from_readiness(payload: Any, source: str) -> dict[str, Any] | None:
+    snaps = _ported2_snapshots(payload)
+    if not snaps:
+        return None
+    latest = max(snaps, key=lambda s: str(s.get("timestampLocal") or s.get("timestamp") or ""))
+    phrase = latest.get("recoveryTimeChangePhrase")
+    hours = _ported2_hours(latest.get("recoveryTime"), phrase)
+    if hours is None:
+        return None
+    score = latest.get("score") if latest.get("score") is not None else latest.get("readinessScore")
+    out = {
+        "remaining_hours": hours,
+        "value_type": "snapshot",
+        "as_of": latest.get("timestampLocal") or latest.get("timestamp"),
+        "recovery_score": score,
+        "state": _ported2_recovery_state(hours, phrase),
+        "source": source,
+        "date": latest.get("calendarDate"),
+        "change_phrase": phrase,
+        "level": latest.get("level") or latest.get("readinessLevel"),
+    }
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def _ported2_recovery_from_activities(api: Garmin, now: datetime, errors: list[dict[str, str]]) -> dict[str, Any] | None:
+    """Estima el tiempo de recuperación restante descontando el recoveryTime de las últimas actividades."""
+    try:
+        items = api.get_activities(0, 20)
+    except Exception as exc:
+        errors.append({"source": "get_activities", "error": str(exc)})
+        return None
+    best: dict[str, Any] | None = None
+    best_end: datetime | None = None
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        recovery = item.get("recoveryTime")
+        begin = item.get("beginTimestamp")
+        if isinstance(recovery, bool) or not isinstance(recovery, (int, float)):
+            continue
+        if isinstance(begin, bool) or not isinstance(begin, (int, float)) or begin <= 0:
+            continue
+        try:
+            duration = float(item.get("duration") or item.get("elapsedDuration") or 0)
+        except (TypeError, ValueError):
+            duration = 0.0
+        end = datetime.fromtimestamp(begin / 1000.0, tz=now.tzinfo) + timedelta(seconds=duration)
+        elapsed_min = max(0.0, (now - end).total_seconds() / 60.0)
+        hours = round(max(0.0, float(recovery) - elapsed_min) / 60.0, 1)
+        if best_end is None or end > best_end:
+            best_end = end
+            best = {
+                "remaining_hours": hours,
+                "state": _ported2_recovery_state(hours),
+                "source": "recent_activity",
+                "value_type": "estimate",
+                "as_of": now.isoformat(),
+                "activity_id": item.get("activityId"),
+                "activity_name": item.get("activityName"),
+            }
+    return best
+
+
+@mcp.tool
+def get_morning_training_readiness(target_date: str = None) -> dict:
+    """Predisposición para entrenar de la mañana (la medida justo al despertar, la del informe matinal de Garmin).
+    Formato fecha: YYYY-MM-DD (por defecto hoy). Solo existe en relojes con Predisposición para entrenar:
+    el Forerunner 255 no la publica.
+    """
+    parsed = _parse_date(target_date)
+    with FETCH_LOCK:
+        api = _get_api()
+        data, err = _optional_call_first(api, ("get_morning_training_readiness",), parsed)
+    if not data:
+        raise RuntimeError(err or f"Sin Predisposición para entrenar matinal el {parsed} (el reloj puede no publicarla).")
+    return {"date": parsed, "morning_training_readiness": data}
+
+
+@mcp.tool
+def get_recovery_time_remaining(target_date: str = None) -> dict:
+    """Horas de recuperación que le quedan al reloj en un día (el contador Firstbeat del reloj).
+    Usa Predisposición para entrenar y, si no hay (p. ej. Forerunner 255), estima el contador para HOY
+    descontando el tiempo de recuperación de las últimas actividades (value_type='estimate').
+    Formato fecha: YYYY-MM-DD (por defecto hoy).
+    """
+    parsed = _parse_date(target_date)
+    errors: list[dict[str, str]] = []
+    with FETCH_LOCK:
+        api = _get_api()
+        for source, method in (("training_readiness", "get_training_readiness"), ("morning_training_readiness", "get_morning_training_readiness")):
+            fn = getattr(api, method, None)
+            if not callable(fn):
+                continue
+            try:
+                out = _ported2_recovery_from_readiness(fn(parsed), source)
+            except Exception as exc:
+                errors.append({"source": method, "error": str(exc)})
+                continue
+            if out:
+                out.setdefault("date", parsed)
+                if errors:
+                    out["source_errors"] = errors
+                return out
+        now = _now_local()
+        if parsed == now.date().isoformat():
+            out = _ported2_recovery_from_activities(api, now, errors)
+            if out:
+                out.setdefault("date", parsed)
+                if errors:
+                    out["source_errors"] = errors
+                return out
+    if errors:
+        raise RuntimeError("; ".join(f"{e['source']}: {e['error']}" for e in errors))
+    return {
+        "date": parsed,
+        "remaining_hours": None,
+        "state": "no_disponible",
+        "message": (
+            "Garmin no publicó ningún dato de recuperación para este día; la estimación por actividades solo existe para hoy."
+            if parsed != _now_local().date().isoformat() else
+            "Sin Predisposición para entrenar y las actividades recientes no traen recoveryTime (el Forerunner 255 muestra la "
+            "recuperación en el reloj pero no la publica en Connect), así que no hay forma de estimarla."
+        ),
+    }
+
+
+def _ported2_event_distance_m(item: dict[str, Any]) -> float | None:
+    target = _ported2_dict(item.get("completionTarget"))
+    scale = _EVENT_DISTANCE_UNIT_TO_M.get(target.get("unit"))
+    value = target.get("value")
+    if target.get("unitType") != "distance" or scale is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) * scale
+
+
+def _ported2_event_goal_s(detail: dict[str, Any]) -> float | None:
+    goal = _ported2_dict(_ported2_dict(detail.get("eventCustomization")).get("customGoal"))
+    value = goal.get("value")
+    if goal.get("unitType") != "time" or goal.get("unit") != "second" or isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _ported2_clean(value: Any) -> str | None:
+    return value.strip() or None if isinstance(value, str) else None
+
+
+@mcp.tool
+def get_calendar_events(start_date: str, end_date: str) -> dict:
+    """Carreras y eventos del calendario de Garmin Connect entre dos fechas (YYYY-MM-DD): título, fecha,
+    distancia en metros, objetivo de tiempo en segundos, hora local, lugar y si es la carrera objetivo
+    (primary_event) del plan activo. No salen en get_scheduled_workouts (solo entrenos) ni en get_goals.
+    """
+    start = date.fromisoformat(start_date)
+    end = date.fromisoformat(end_date)
+    if start > end:
+        raise ValueError("start_date debe ser igual o anterior a end_date.")
+    events: list[dict[str, Any]] = []
+    seen: set[tuple[Any, Any, Any]] = set()
+    with FETCH_LOCK:
+        api = _get_api()
+        year, month = start.year, start.month
+        while (year, month) <= (end.year, end.month):
+            try:
+                data = api.get_scheduled_workouts(year, month)
+            except Exception as exc:
+                raise RuntimeError(f"No se pudo leer el calendario de {year}-{month:02d}: {exc}")
+            items = data.get("calendarItems") if isinstance(data, dict) else None
+            for item in items if isinstance(items, list) else []:
+                if not isinstance(item, dict) or item.get("itemType") != "event":
+                    continue
+                day = item.get("date")
+                if not isinstance(day, str) or not start_date <= day <= end_date:
+                    continue
+                key = (item.get("shareableEventUuid"), item.get("title"), day)
+                if key in seen:
+                    continue
+                seen.add(key)
+                detail: dict[str, Any] = {}
+                eid, uuid = item.get("id"), _ported2_clean(item.get("shareableEventUuid"))
+                path = f"/calendar-service/event/{eid}" if isinstance(eid, (int, str)) and not isinstance(eid, bool) else (
+                    f"/calendar-service/event/{uuid}/shareable" if uuid else None)
+                if path:
+                    try:
+                        detail = _ported2_dict(api.connectapi(path))
+                    except Exception:
+                        detail = {}
+                when = _ported2_dict(item.get("eventTimeLocal"))
+                events.append({
+                    "title": item.get("title"),
+                    "date": day,
+                    "is_race": bool(item.get("isRace")),
+                    "primary_event": bool(item.get("primaryEvent")),
+                    "distance_meters": _ported2_event_distance_m(item),
+                    "goal_time_seconds": _ported2_event_goal_s(detail),
+                    "start_time_local": when.get("startTimeHhMm"),
+                    "time_zone": when.get("timeZoneId"),
+                    "location": _ported2_clean(item.get("location")),
+                    "url": item.get("url"),
+                    "event_uuid": item.get("shareableEventUuid"),
+                })
+            year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+    events.sort(key=lambda e: (e["date"], e["title"] or ""))
+    return {"count": len(events), "date_range": {"start": start_date, "end": end_date}, "events": events}
+
+
+@mcp.tool
+def get_respiration_trend(start_date: str, end_date: str) -> dict:
+    """Tendencia de la frecuencia respiratoria por día (respiraciones/min): media despierto, media dormido,
+    máxima y mínima. Una respiración en reposo por encima de tu línea base es señal temprana de fatiga, enfermedad
+    o mala recuperación; combínala con get_hrv_trend. Máximo 30 días (1 petición por día).
+    """
+    start, end, days = _ported_date_range(start_date, end_date, 30)
+    trend = []
+    with FETCH_LOCK:
+        api = _get_api()
+        for i in range(days):
+            d = (start + timedelta(days=i)).isoformat()
+            try:
+                data = api.get_respiration_data(d)
+            except Exception as exc:
+                raise RuntimeError(f"Error leyendo respiración de {d}: {exc}")
+            if not isinstance(data, dict):
+                continue
+            row: dict[str, Any] = {"date": d}
+            for src, dst in (
+                ("avgWakingRespirationValue", "avg_waking_breaths_per_min"),
+                ("avgSleepRespirationValue", "avg_sleep_breaths_per_min"),
+                ("highestRespirationValue", "highest_breaths_per_min"),
+                ("lowestRespirationValue", "lowest_breaths_per_min"),
+            ):
+                if isinstance(data.get(src), (int, float)):
+                    row[dst] = round(data[src], 1)
+            if len(row) > 1:
+                trend.append(row)
+    if not trend:
+        raise RuntimeError(f"Sin datos de respiración entre {start_date} y {end_date}.")
+    sleep_vals = [r["avg_sleep_breaths_per_min"] for r in trend if "avg_sleep_breaths_per_min" in r]
+    return {
+        "start_date": start_date,
+        "end_date": end_date,
+        "days_with_data": len(trend),
+        "period_avg_sleep_breaths_per_min": round(sum(sleep_vals) / len(sleep_vals), 1) if sleep_vals else None,
+        "trend": trend,
+    }
+
+
+@mcp.tool
+def get_lactate_threshold(start_date: str = None, end_date: str = None) -> dict:
+    """Umbral de lactato: velocidad (m/s), FC de umbral y, si hay potenciómetro, FTP. Sin fechas devuelve el
+    último valor; con start_date y end_date (YYYY-MM-DD, ambas) devuelve el histórico. Requiere un reloj con
+    umbral de lactato (el Forerunner 255 lo calcula).
+    """
+    if bool(start_date) != bool(end_date):
+        raise ValueError("Indica start_date y end_date juntas para el histórico, o ninguna para el último valor.")
+    with FETCH_LOCK:
+        api = _get_api()
+        try:
+            if start_date:
+                data = api.get_lactate_threshold(latest=False, start_date=start_date, end_date=end_date)
+            else:
+                data = api.get_lactate_threshold(latest=True)
+        except Exception as exc:
+            raise RuntimeError(f"No se pudo leer el umbral de lactato: {exc}")
+    if not data:
+        raise RuntimeError("Garmin no devolvió datos de umbral de lactato.")
+
+    def mps(raw: Any) -> float | None:
+        return round(raw * _CM_PER_MS_TO_MPS, 3) if isinstance(raw, (int, float)) and raw else None
+
+    if start_date:
+        hr = data.get("heart_rate") or data.get("heartRate") or []
+        out: dict[str, Any] = {
+            "start_date": start_date,
+            "end_date": end_date,
+            "speed_history": [{"date": e.get("from"), "speed_mps": mps(e.get("value")), "series": e.get("series")} for e in data.get("speed") or []],
+            "heart_rate_history": [{"date": e.get("from"), "heart_rate_bpm": e.get("value"), "series": e.get("series")} for e in hr],
+            "power_history": [{"date": e.get("from"), "power_watts": e.get("value"), "series": e.get("series")} for e in data.get("power") or []],
+        }
+        return {k: v for k, v in out.items() if v not in (None, [])}
+    sh = _ported2_dict(data.get("speed_and_heart_rate"))
+    pw = _ported2_dict(data.get("power"))
+    out = {
+        "lactate_threshold_speed_mps": mps(sh.get("speed")),
+        "lactate_threshold_heart_rate_bpm": sh.get("heartRate"),
+        "heart_rate_cycling_bpm": sh.get("heartRateCycling"),
+        "speed_hr_date": sh.get("calendarDate"),
+        "functional_threshold_power_watts": pw.get("functionalThresholdPower"),
+        "weight_kg": pw.get("weight"),
+        "power_to_weight": pw.get("powerToWeight"),
+        "sport": pw.get("sport"),
+        "power_date": pw.get("calendarDate"),
+        "is_stale": pw.get("isStale"),
+    }
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def _ported2_first(mapping: Any, *keys: str) -> Any:
+    data = _ported2_dict(mapping)
+    for key in keys:
+        if data.get(key) is not None:
+            return data[key]
+    return None
+
+
+def _ported2_minutes_to_hours(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return None
+    return round(value / 60.0, 1)
+
+
+@mcp.tool
+def get_training_effect(activity_id: str) -> dict:
+    """Efecto de entrenamiento de una actividad: aeróbico, anaeróbico, etiqueta, carga y tiempo de recuperación (h).
+    Si el detalle de la actividad da 403 (pasa con algunas actividades recientes), cae a la búsqueda en la lista de
+    actividades, que también lo incluye. activity_id: identificador numérico.
+    """
+    aid = _ported_parse_activity_id(activity_id)
+    source = "activity_details"
+    activity: Any = None
+    detail_err: Exception | None = None
+    with FETCH_LOCK:
+        api = _get_api()
+        try:
+            activity = api.get_activity(aid)
+        except Exception as exc:
+            text = str(exc).lower()
+            if "403" not in text and "forbidden" not in text:
+                raise RuntimeError(f"Error leyendo el efecto de entrenamiento: {exc}")
+            detail_err = exc
+        if not activity:
+            source = "activity_list"
+            url = getattr(api, "garmin_connect_activities", "/activitylist-service/activities/search/activities")
+            for params in ({"activityIds": str(aid), "start": "0", "limit": "1"}, {"start": "0", "limit": "100"}):
+                try:
+                    payload = api.connectapi(url, params=params)
+                except Exception:
+                    continue
+                rows = payload if isinstance(payload, list) else (_ported2_dict(payload).get("activityList") or _ported2_dict(payload).get("activities") or [])
+                activity = next((r for r in rows if isinstance(r, dict) and str(r.get("activityId")) == str(aid)), None)
+                if activity:
+                    break
+    if not activity:
+        if detail_err is not None:
+            raise RuntimeError(f"Garmin devolvió 403 para el detalle de {aid} y no está en la búsqueda reciente.")
+        raise RuntimeError(f"No se encontró la actividad {aid}.")
+    summary = _ported2_dict(_ported2_dict(activity).get("summaryDTO"))
+    aerobic = _ported2_first(summary, "trainingEffect", "aerobicTrainingEffect")
+    if aerobic is None:
+        aerobic = _ported2_first(activity, "aerobicTrainingEffect", "trainingEffect")
+    anaerobic = _ported2_first(summary, "anaerobicTrainingEffect")
+    if anaerobic is None:
+        anaerobic = _ported2_first(activity, "anaerobicTrainingEffect")
+    label = _ported2_first(summary, "trainingEffectLabel")
+    if label is None:
+        label = _ported2_first(activity, "trainingEffectLabel", "aerobicTrainingEffectMessage")
+    recovery = _ported2_first(summary, "recoveryTime")
+    if recovery is None:
+        recovery = _ported2_first(activity, "recoveryTime")
+    load = _ported2_first(summary, "activityTrainingLoad")
+    if load is None:
+        load = _ported2_first(activity, "activityTrainingLoad")
+    out = {
+        "activity_id": aid,
+        "source": source,
+        "aerobic_effect": aerobic,
+        "anaerobic_effect": anaerobic,
+        "training_effect_label": label,
+        "recovery_time_hours": _ported2_minutes_to_hours(recovery),
+        "training_load": load,
+        "performance_condition": _ported2_first(summary, "performanceCondition") if _ported2_first(summary, "performanceCondition") is not None else _ported2_first(activity, "performanceCondition"),
+    }
+    return {k: v for k, v in out.items() if v is not None}
+
+
+@mcp.tool
+def get_sleep_summary_range(start_date: str, end_date: str) -> dict:
+    """Resumen ligero del sueño noche a noche entre dos fechas (YYYY-MM-DD, máximo 90): puntuación, duración,
+    fases, FC en reposo, SpO2 y VFC nocturna. Úsala para tendencias en vez de pedir cada noche por separado
+    (hace una petición por noche). Las noches sin datos se omiten.
+    """
+    start, end, days = _ported_date_range(start_date, end_date, 90)
+    nights = []
+    with FETCH_LOCK:
+        api = _get_api()
+        for i in range(days):
+            d = (start + timedelta(days=i)).isoformat()
+            try:
+                data = api.get_sleep_data(d)
+            except Exception as exc:
+                raise RuntimeError(f"Error leyendo el sueño de {d}: {exc}")
+            if not isinstance(data, dict):
+                continue
+            daily = _ported2_dict(data.get("dailySleepDTO"))
+            row: dict[str, Any] = {"date": d}
+            if daily:
+                overall = _ported2_dict(_ported2_dict(daily.get("sleepScores")).get("overall"))
+                total = daily.get("sleepTimeSeconds")
+                row.update({
+                    "sleep_seconds": total,
+                    "sleep_hours": round(total / 3600, 2) if isinstance(total, (int, float)) and total else None,
+                    "sleep_score": overall.get("value"),
+                    "sleep_score_qualifier": overall.get("qualifierKey"),
+                    "deep_sleep_seconds": daily.get("deepSleepSeconds"),
+                    "light_sleep_seconds": daily.get("lightSleepSeconds"),
+                    "rem_sleep_seconds": daily.get("remSleepSeconds"),
+                    "awake_seconds": daily.get("awakeSleepSeconds"),
+                    "awake_count": daily.get("awakeCount"),
+                    "avg_sleep_stress": daily.get("avgSleepStress"),
+                })
+            row["resting_heart_rate_bpm"] = data.get("restingHeartRate", daily.get("restingHeartRate"))
+            spo2 = _ported2_dict(data.get("wellnessSpO2SleepSummaryDTO"))
+            row["avg_spo2_percent"] = spo2.get("averageSPO2", spo2.get("averageSpo2"))
+            row["avg_overnight_hrv"] = data.get("avgOvernightHrv")
+            row = {k: v for k, v in row.items() if v is not None}
+            if len(row) > 1:
+                nights.append(row)
+    if not nights:
+        raise RuntimeError(f"Sin datos de sueño entre {start_date} y {end_date}.")
+    return {"start_date": start_date, "end_date": end_date, "nights_requested": days, "nights_returned": len(nights), "nights": nights}
+
+
+@mcp.tool
+def get_stats_range(start_date: str, end_date: str) -> dict:
+    """Calorías (totales, activas y en reposo) y pasos por día entre dos fechas (YYYY-MM-DD, máximo 28 días),
+    en dos peticiones en total en lugar de una por día. Los días sin datos salen con has_data=false y valores
+    null (nunca 0), y el día actual lleva is_partial=true porque solo cuenta las horas transcurridas.
+    'resting_calories' es el RMR de Garmin, no el metabolismo basal real.
+    """
+    start, end, days = _ported_date_range(start_date, end_date, 28)
+    url = f"/usersummary-service/stats/daily/{start_date}/{end_date}"
+    with FETCH_LOCK:
+        api = _get_api()
+        try:
+            cal_resp = api.connectapi(url, params={"statsType": "CALORIES"})
+            steps_resp = api.connectapi(url, params={"statsType": "STEPS"})
+        except Exception as exc:
+            raise RuntimeError(f"Error leyendo estadísticas del rango: {exc}")
+    cal_by = {e.get("calendarDate"): e.get("values") or {} for e in _ported2_dict(cal_resp).get("values") or []}
+    steps_by = {e.get("calendarDate"): e.get("values") or {} for e in _ported2_dict(steps_resp).get("values") or []}
+    today = _today_local().isoformat()
+    rows = []
+    for i in range(days):
+        d = (start + timedelta(days=i)).isoformat()
+        cal, st = cal_by.get(d), steps_by.get(d)
+        rows.append({
+            "date": d,
+            "total_calories": (cal or {}).get("totalCalories"),
+            "active_calories": (cal or {}).get("activeCalories"),
+            "resting_calories": (cal or {}).get("restingCalories"),
+            "steps": (st or {}).get("totalSteps"),
+            "has_data": cal is not None or st is not None,
+            "is_partial": d == today,
+        })
+    if not any(r["has_data"] for r in rows):
+        raise RuntimeError(f"Sin estadísticas entre {start_date} y {end_date}.")
+    return {"start_date": start_date, "end_date": end_date, "days": rows}
+
+
+# Alias en inglés -> typeId de Garmin (los typeId son estables aunque el typeKey vaya localizado).
+_PORTED2_TYPE_ALIASES = {
+    "running": 1, "cycling": 2, "hiking": 3, "other": 4, "mountain_biking": 5, "trail_running": 6, "street_running": 7,
+    "track_running": 8, "walking": 9, "road_biking": 10, "strength_training": 13, "treadmill_running": 18,
+    "indoor_cycling": 25, "lap_swimming": 27, "open_water_swimming": 28, "elliptical": 30, "indoor_running": 156,
+    "yoga": 163, "pilates": 160, "hiit": 180, "ultra_run": 181,
+}
+
+
+def _ported2_gear_missing(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "gear" in text and ("doesn't exist" in text or "not found" in text or "404" in text)
+
+
+@mcp.tool
+def add_gear_to_activity(activity_id: str, gear_uuid: str) -> dict:
+    """Asocia un material (zapatillas, bici...) a una actividad. gear_uuid sale de get_gear.
+    ESCRIBE en tu cuenta de Garmin.
+    """
+    _ported_check_writes()
+    aid = _ported_parse_activity_id(activity_id)
+    with FETCH_LOCK:
+        api = _get_api()
+        try:
+            api.add_gear_to_activity(gear_uuid, aid)
+        except Exception as exc:
+            if _ported2_gear_missing(exc):
+                raise RuntimeError(f"El material {gear_uuid} no existe o no se encuentra para la actividad {aid}.")
+            raise
+    return {"ok": True, "activity_id": aid, "gear_uuid": gear_uuid}
+
+
+@mcp.tool
+def remove_gear_from_activity(activity_id: str, gear_uuid: str) -> dict:
+    """Quita un material de una actividad. gear_uuid sale de get_activity_gear / get_gear.
+    ESCRIBE en tu cuenta de Garmin.
+    """
+    _ported_check_writes()
+    aid = _ported_parse_activity_id(activity_id)
+    with FETCH_LOCK:
+        api = _get_api()
+        try:
+            api.remove_gear_from_activity(gear_uuid, aid)
+        except Exception as exc:
+            if _ported2_gear_missing(exc):
+                raise RuntimeError(f"El material {gear_uuid} no existe o no está asociado a la actividad {aid}.")
+            raise
+    return {"ok": True, "activity_id": aid, "gear_uuid": gear_uuid}
+
+
+@mcp.tool
+def set_activity_type(activity_id: str, type_key: str) -> dict:
+    """Cambia el tipo de actividad (deporte) de una actividad mal clasificada, p. ej. 'trail_running' -> 'running'.
+    type_key debe ser una clave válida de get_activity_types. ESCRIBE en tu cuenta de Garmin.
+    """
+    _ported_check_writes()
+    aid = _ported_parse_activity_id(activity_id)
+    key = (type_key or "").strip()
+    with FETCH_LOCK:
+        api = _get_api()
+        types = [t for t in (api.get_activity_types() or []) if isinstance(t, dict)]
+        # Tu cuenta devuelve typeKey localizados ("Correr", "Trail running"): se acepta el typeKey tal cual
+        # (sin distinguir mayúsculas), el typeId numérico o los alias en inglés más habituales.
+        wanted = {key.lower(), str(_PORTED2_TYPE_ALIASES.get(key.lower(), "")), }
+        match = next((t for t in types if str(t.get("typeKey", "")).lower() in wanted or str(t.get("typeId")) in wanted), None)
+        if not match:
+            valid = ", ".join(sorted(f"{t.get('typeKey')} ({t.get('typeId')})" for t in types if t.get("typeKey")))
+            raise ValueError(f"Tipo de actividad desconocido {key!r}. Válidos (typeKey (typeId)): {valid}")
+        api.set_activity_type(aid, match["typeId"], match["typeKey"], match.get("parentTypeId"))
+    return {"ok": True, "activity_id": aid, "type_key": match["typeKey"], "type_id": match["typeId"]}
+
+
+@mcp.tool
+def reschedule_workout(scheduled_workout_id: int, calendar_date: str) -> dict:
+    """Mueve un entreno ya planificado a otra fecha (YYYY-MM-DD) SIN duplicarlo: conserva el mismo id de calendario.
+    Mejor que unschedule + schedule. scheduled_workout_id es el id de la entrada del calendario
+    (scheduledWorkoutId de get_scheduled_workouts), no el id del entreno. Repetirlo con la misma fecha no cambia nada.
+    ESCRIBE en tu calendario de Garmin.
+    """
+    _ported_check_writes()
+    new_date = date.fromisoformat(calendar_date).isoformat()
+    sid = int(scheduled_workout_id)
+    with FETCH_LOCK:
+        api = _get_api()
+        current = api.get_scheduled_workout_by_id(sid)
+        if not current:
+            raise RuntimeError(f"No existe el entreno planificado {sid}.")
+        workout = _ported2_dict(current.get("workout"))
+        payload = {**current, "calendarDate": new_date, "workout": {"workoutId": workout.get("workoutId")} if workout else None}
+        _garmin_transport_call(api, "put", f"workout-service/schedule/{sid}", json=payload)
+    return {"ok": True, "scheduled_workout_id": sid, "previous_date": current.get("calendarDate"), "calendar_date": new_date}
 # === PORTED TOOLS (Taxuspt/garmin_mcp) END ===
 
 
