@@ -10723,6 +10723,346 @@ async def hrmax_candidates_web(request: Request) -> JSONResponse:
 # === COACH COMPACT TOOLS END ===
 
 
+# === COMPACT ANALYSIS TOOLS START ===
+# Cuatro herramientas que calculan EN EL SERVIDOR lo que antes obligaba a volcar actividades enteras
+# (get_activity_full, get_activities_in_range...) para sacar unos pocos números. Devuelven solo cifras.
+_CA_RUNNING_TYPE_IDS = {1, 6, 7, 8, 18, 153, 154, 156, 181}
+_CA_ZONE_TARGETS = {"Z1": (80, 85), "Z2": (12, 18), "Z3": (2, 10)}
+_CA_HARD_LABELS = {"TEMPO", "LACTATE_THRESHOLD", "VO2MAX", "ANAEROBIC_CAPACITY", "SPEED"}
+_CA_MAX_ACTIVITIES = 60
+_CA_RECORDS_CACHE: dict[int, list[tuple[float, int, float | None]]] = {}
+
+
+def _ca_is_running(act: dict[str, Any]) -> bool:
+    atype = act.get("activityType") if isinstance(act.get("activityType"), dict) else {}
+    if atype.get("typeId") in _CA_RUNNING_TYPE_IDS or atype.get("parentTypeId") == 1:
+        return True
+    key = str(atype.get("typeKey") or "").lower()
+    return "run" in key or "correr" in key
+
+
+def _ca_day(act: dict[str, Any]) -> str:
+    return str(act.get("startTimeLocal") or "")[:10]
+
+
+def _ca_num(value: Any) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _ca_list_activities(start_date: str, end_date: str) -> list[dict[str, Any]]:
+    with FETCH_LOCK:
+        api = _get_api()
+        acts = api.get_activities_by_date(start_date, end_date) or []
+    return [a for a in acts if isinstance(a, dict)]
+
+
+def _ca_records(activity_id: int) -> list[tuple[float, int, float | None]]:
+    """(timestamp, fc, velocidad m/s) de cada record del FIT. Las actividades no cambian: se cachean."""
+    cached = _CA_RECORDS_CACHE.get(activity_id)
+    if cached is not None:
+        return cached
+    import fitparse  # type: ignore
+    with FETCH_LOCK:
+        api = _get_api()
+        raw = api.download_activity(int(activity_id), dl_fmt=Garmin.ActivityDownloadFormat.ORIGINAL)
+    if not raw:
+        raise RuntimeError(f"Garmin no devolvió FIT para la actividad {activity_id}.")
+    fit = fitparse.FitFile(_io.BytesIO(_coach_fit_bytes(bytes(raw))))
+    recs: list[tuple[float, int, float | None]] = []
+    for msg in fit.get_messages("record"):
+        vals = {f.name: f.value for f in msg}
+        ts, hr = vals.get("timestamp"), vals.get("heart_rate")
+        if ts is None or not isinstance(hr, (int, float)) or hr <= 0:
+            continue
+        sp = vals.get("enhanced_speed", vals.get("speed"))
+        recs.append((ts.timestamp() if hasattr(ts, "timestamp") else float(ts), int(hr), float(sp) if isinstance(sp, (int, float)) else None))
+    if len(_CA_RECORDS_CACHE) >= 64:
+        _CA_RECORDS_CACHE.pop(next(iter(_CA_RECORDS_CACHE)))
+    _CA_RECORDS_CACHE[activity_id] = recs
+    return recs
+
+
+def _ca_zone_seconds(recs: list[tuple[float, int, float | None]], z1_upper: int, z2_upper: int) -> dict[str, float]:
+    """Segundos en Z1 (fc < z1_upper), Z2 (z1_upper <= fc <= z2_upper) y Z3 (fc > z2_upper).
+    Cada record pesa lo que dura hasta el siguiente (máx. 10 s, para no contar pausas)."""
+    out = {"Z1": 0.0, "Z2": 0.0, "Z3": 0.0}
+    for i, (t, hr, _) in enumerate(recs):
+        dt = min(max(recs[i + 1][0] - t, 0.0), 10.0) if i + 1 < len(recs) else 1.0
+        out["Z1" if hr < z1_upper else ("Z2" if hr <= z2_upper else "Z3")] += dt
+    return out
+
+
+def _ca_pct(zones: dict[str, float]) -> dict[str, float | None]:
+    total = sum(zones.values())
+    return {z: (round(100 * s / total, 1) if total > 0 else None) for z, s in zones.items()}
+
+
+def _ca_vs_target(pct: dict[str, float | None]) -> dict[str, str | None]:
+    out: dict[str, str | None] = {}
+    for z, (lo, hi) in _CA_ZONE_TARGETS.items():
+        v = pct.get(z)
+        out[z] = None if v is None else ("dentro" if lo <= v <= hi else ("por_debajo" if v < lo else "por_encima"))
+    return out
+
+
+@mcp.tool
+def get_time_in_zones(
+    start_date: str,
+    end_date: str,
+    z1_upper: int = 140,
+    z2_upper: int = 165,
+    activity_type: str = "running",
+) -> dict:
+    """Tiempo en TUS 3 zonas de FC (Z1 < z1_upper, Z2 hasta z2_upper incluido, Z3 por encima; por defecto 140/165)
+    por actividad y en total del periodo, con el % real frente al objetivo semanal 80-85 / 12-18 / 2-10.
+    Calculado desde los records del FIT (no reagrupa las 5 zonas de Garmin, que no coinciden con las tuyas).
+    start_date/end_date: YYYY-MM-DD, máximo 90 días y 60 actividades. activity_type: 'running' (por defecto) o 'all'.
+    El % es de TIEMPO, no de sesiones. Devuelve solo cifras: usa get_activity_full si necesitas el detalle.
+    """
+    start, end = _coach_parse_range(start_date, end_date)
+    if not 60 <= z1_upper < z2_upper <= 220:
+        raise ValueError("Zonas no válidas: se requiere 60 <= z1_upper < z2_upper <= 220.")
+    only_running = (activity_type or "running").strip().lower() != "all"
+    acts = [a for a in _ca_list_activities(start.isoformat(), end.isoformat()) if (not only_running or _ca_is_running(a))]
+    acts.sort(key=lambda a: str(a.get("startTimeLocal") or ""))
+    if not acts:
+        raise RuntimeError(f"Sin actividades entre {start_date} y {end_date}.")
+    skipped = max(0, len(acts) - _CA_MAX_ACTIVITIES)
+    acts = acts[-_CA_MAX_ACTIVITIES:]
+    rows: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    total = {"Z1": 0.0, "Z2": 0.0, "Z3": 0.0}
+    for a in acts:
+        aid = a.get("activityId")
+        try:
+            secs = _ca_zone_seconds(_ca_records(int(aid)), z1_upper, z2_upper)
+        except Exception as exc:
+            errors.append({"activity_id": aid, "date": _ca_day(a), "error": str(exc)})
+            continue
+        if sum(secs.values()) <= 0:
+            continue
+        for z in total:
+            total[z] += secs[z]
+        pct = _ca_pct(secs)
+        rows.append({
+            "activity_id": aid, "date": _ca_day(a), "name": a.get("activityName"),
+            "minutes": round(sum(secs.values()) / 60, 1),
+            "z1_min": round(secs["Z1"] / 60, 1), "z2_min": round(secs["Z2"] / 60, 1), "z3_min": round(secs["Z3"] / 60, 1),
+            "z1_pct": pct["Z1"], "z2_pct": pct["Z2"], "z3_pct": pct["Z3"],
+        })
+    if not rows:
+        raise RuntimeError("Ninguna actividad del rango tiene FC en el FIT." + (f" Errores: {errors}" if errors else ""))
+    tpct = _ca_pct(total)
+    out: dict[str, Any] = {
+        "start_date": start_date, "end_date": end_date, "activities": len(rows),
+        "zones": {"Z1": f"< {z1_upper}", "Z2": f"{z1_upper}-{z2_upper}", "Z3": f"> {z2_upper}"},
+        "total_minutes": round(sum(total.values()) / 60, 1),
+        "total_pct": {"Z1": tpct["Z1"], "Z2": tpct["Z2"], "Z3": tpct["Z3"]},
+        "objetivo_pct": {z: f"{lo}-{hi}" for z, (lo, hi) in _CA_ZONE_TARGETS.items()},
+        "vs_objetivo": _ca_vs_target(tpct),
+        "per_activity": rows,
+    }
+    if skipped:
+        out["omitidas_por_limite"] = skipped
+    if errors:
+        out["errors"] = errors
+    return out
+
+
+_CA_PLANNED_KINDS = _COACH_WORKOUT_KINDS
+
+
+_CA_EASY_WORDS = ("rodaje", "regenerativ", "suave", "fácil", "facil", "recuperaci")
+
+
+def _ca_planned_easy(titles: list[str] | None) -> bool:
+    """True si TODO lo planificado ese día es un rodaje suave/regenerativo."""
+    return bool(titles) and all(any(w in str(t).lower() for w in _CA_EASY_WORDS) for t in titles)
+
+
+def _ca_is_hard(act: dict[str, Any]) -> bool:
+    label = str(act.get("trainingEffectLabel") or "").upper()
+    aer, ana = _ca_num(act.get("aerobicTrainingEffect")), _ca_num(act.get("anaerobicTrainingEffect"))
+    return label in _CA_HARD_LABELS or (aer is not None and aer >= 4.0) or (ana is not None and ana >= 2.0)
+
+
+@mcp.tool
+def get_weekly_summary(week_start: str = None, weeks: int = 1) -> dict:
+    """Resumen compacto de una o varias semanas lunes-domingo de running: km, minutos, carga, sesiones, sesiones duras,
+    días de descanso, días mínimos entre sesiones duras y, por día, lo PLANIFICADO en el calendario frente a lo EJECUTADO.
+    week_start: cualquier fecha YYYY-MM-DD (se normaliza a su lunes); por defecto la semana actual. weeks: 1-12.
+    Si lo planificado ese día es un rodaje (rodaje/regenerativo/suave), la sesión NUNCA cuenta como dura aunque Garmin
+    la etiquete TEMPO (se marca garmin_says_hard para señalar que fue demasiado intensa para lo pautado).
+    Sin plan ese día: sesión dura = etiqueta TEMPO/UMBRAL/VO2MAX/capacidad anaeróbica, o efecto aeróbico >= 4,0, o anaeróbico >= 2,0:
+    una sesión planificada como rodaje puede salir dura (Garmin la clasifica por lo que hiciste, no por lo que tocaba).
+    Es la lectura previa que pide pauta-entrenamiento antes de pautar una semana nueva.
+    """
+    weeks = int(weeks)
+    if not 1 <= weeks <= 12:
+        raise ValueError("weeks entre 1 y 12.")
+    base = date.fromisoformat(week_start) if week_start else _today_local()
+    monday = base - timedelta(days=base.weekday())
+    last_sunday = monday + timedelta(days=7 * weeks - 1)
+    acts = [a for a in _ca_list_activities(monday.isoformat(), last_sunday.isoformat()) if _ca_is_running(a)]
+    planned: dict[str, list[str]] = {}
+    with FETCH_LOCK:
+        api = _get_api()
+        for y, m in _coach_months(monday, last_sunday):
+            try:
+                items = _coach_fetch_month(api, y, m)
+            except Exception:
+                continue
+            for it in items:
+                day = it.get("date")
+                kind = str(it.get("itemType") or "").lower()
+                if isinstance(day, str) and monday.isoformat() <= day <= last_sunday.isoformat() and kind != "activity" and (kind in _CA_PLANNED_KINDS or it.get("workoutId")):
+                    planned.setdefault(day, []).append(str(it.get("title")))
+    out_weeks: list[dict[str, Any]] = []
+    for w in range(weeks):
+        ws = monday + timedelta(days=7 * w)
+        days = [(ws + timedelta(days=i)).isoformat() for i in range(7)]
+        wacts = sorted((a for a in acts if _ca_day(a) in days), key=lambda a: str(a.get("startTimeLocal") or ""))
+        sessions = []
+        for a in wacts:
+            garmin_hard = _ca_is_hard(a)
+            hard = garmin_hard and not _ca_planned_easy(planned.get(_ca_day(a)))
+            dist, dur, spd = _ca_num(a.get("distance")) or 0.0, _ca_num(a.get("duration")) or 0.0, _ca_num(a.get("averageSpeed"))
+            sessions.append({
+                "date": _ca_day(a), "name": a.get("activityName"), "km": round(dist / 1000, 2), "min": round(dur / 60, 1),
+                "pace": _coach_pace(spd), "avg_hr": _ca_num(a.get("averageHR")),
+                "te_aerobic": round(_ca_num(a.get("aerobicTrainingEffect")) or 0, 1), "te_anaerobic": round(_ca_num(a.get("anaerobicTrainingEffect")) or 0, 1),
+                "load": round(_ca_num(a.get("activityTrainingLoad")) or 0, 1), "label": a.get("trainingEffectLabel"), "hard": hard,
+            })
+            if garmin_hard and not hard:
+                sessions[-1]["garmin_says_hard"] = True
+        run_days = sorted({s["date"] for s in sessions})
+        hard_days = sorted({s["date"] for s in sessions if s["hard"]})
+        gaps = [(date.fromisoformat(b) - date.fromisoformat(a)).days for a, b in zip(hard_days, hard_days[1:])]
+        by_day = {d: [s["name"] for s in sessions if s["date"] == d] for d in run_days}
+        plan_vs = [{"date": d, "planned": planned[d], "executed": by_day.get(d, []), "done": bool(by_day.get(d))} for d in days if d in planned]
+        out_weeks.append({
+            "week_start": ws.isoformat(), "week_end": days[-1],
+            "km": round(sum(s["km"] for s in sessions), 1), "minutes": round(sum(s["min"] for s in sessions), 1),
+            "load": round(sum(s["load"] for s in sessions), 1), "sessions": len(sessions),
+            "hard_sessions": len(hard_days), "hard_dates": hard_days, "min_days_between_hard": min(gaps) if gaps else None,
+            "rest_days": [d for d in days if d not in run_days],
+            "planned_vs_executed": plan_vs, "unplanned_executed": [d for d in run_days if d not in planned],
+            "per_session": sessions,
+        })
+    return {"criterio_dura": "lo planificado como rodaje nunca es dura; si no, etiqueta TEMPO/UMBRAL/VO2MAX/anaeróbica, o TE aeróbico >= 4,0, o anaeróbico >= 2,0", "weeks": out_weeks}
+
+
+def _ca_drift(recs: list[tuple[float, int, float | None]], skip_pct: float) -> dict[str, Any]:
+    moving = [(t, hr, sp) for t, hr, sp in recs if sp is not None and sp >= 0.5]
+    if len(moving) < 120:
+        raise RuntimeError("Muy pocos records con velocidad y FC para medir la deriva (mínimo 120 s en movimiento).")
+    moving = moving[int(len(moving) * skip_pct / 100):]
+    mid = len(moving) // 2
+    halves = (moving[:mid], moving[mid:])
+    stats = []
+    for h in halves:
+        hr = sum(x[1] for x in h) / len(h)
+        sp = sum(x[2] for x in h) / len(h)  # type: ignore[misc]
+        stats.append((hr, sp, sp / hr))
+    (hr1, sp1, ef1), (hr2, sp2, ef2) = stats
+    drift = (ef1 - ef2) / ef1 * 100
+    return {
+        "first_half": {"avg_hr": round(hr1, 1), "pace": _coach_pace(sp1), "ef_m_per_min_per_bpm": round(ef1 * 60, 3)},
+        "second_half": {"avg_hr": round(hr2, 1), "pace": _coach_pace(sp2), "ef_m_per_min_per_bpm": round(ef2 * 60, 3)},
+        "hr_change_bpm": round(hr2 - hr1, 1), "pace_change_s_per_km": round(1000 / sp2 - 1000 / sp1, 1),
+        "drift_pct": round(drift, 1),
+        "banda": "estable (< 5 %)" if drift < 5 else ("moderada (5-10 %)" if drift <= 10 else "alta (> 10 %)"),
+    }
+
+
+@mcp.tool
+def get_cardiac_drift(activity_id: str, skip_warmup_pct: float = 10.0) -> dict:
+    """Deriva cardiaca (desacople ritmo/FC) de una sesión: compara la 1.ª y la 2.ª mitad del tiempo en movimiento
+    (descartando el primer skip_warmup_pct %, por defecto 10, por el calentamiento) con FC media, ritmo y eficiencia
+    (m/min por ppm). drift_pct = caída porcentual de la eficiencia entre mitades; < 5 % estable, 5-10 % moderada,
+    > 10 % alta. Solo tiene sentido en sesiones continuas a ritmo estable (rodajes, tirada larga): en series o
+    cuestas la 'deriva' mide el diseño de la sesión, no la fatiga. Calculado desde el FIT; devuelve solo cifras.
+    """
+    if not 0 <= skip_warmup_pct <= 40:
+        raise ValueError("skip_warmup_pct entre 0 y 40.")
+    aid = _ported_parse_activity_id(activity_id)
+    res = _ca_drift(_ca_records(aid), float(skip_warmup_pct))
+    res["activity_id"] = str(aid)
+    res["skip_warmup_pct"] = skip_warmup_pct
+    return res
+
+
+def _ca_slope_pct_per_30d(points: list[tuple[float, float]]) -> float | None:
+    """Pendiente de la regresión lineal de y sobre días, en % del valor medio de y por 30 días."""
+    n = len(points)
+    if n < 3:
+        return None
+    mx, my = sum(p[0] for p in points) / n, sum(p[1] for p in points) / n
+    den = sum((p[0] - mx) ** 2 for p in points)
+    if den == 0 or my == 0:
+        return None
+    return round(sum((p[0] - mx) * (p[1] - my) for p in points) / den * 30 / my * 100, 2)
+
+
+@mcp.tool
+def get_comparable_runs(
+    start_date: str,
+    end_date: str,
+    min_km: float = 8.0,
+    max_km: float = 14.0,
+    max_avg_hr: int = None,
+    name_contains: str = None,
+) -> dict:
+    """Evolución de ritmo y FC en carreras comparables (misma franja de distancia) entre dos fechas (YYYY-MM-DD, máx. 400 días).
+    Filtra running entre min_km y max_km, opcionalmente con FC media <= max_avg_hr (para quedarte con los rodajes suaves)
+    y/o nombre que contenga name_contains. Por sesión: fecha, km, ritmo, FC media y eficiencia (m/min por ppm); y un
+    resumen: primer vs último tercio y la pendiente de la eficiencia (% por 30 días; positiva = más rápido para la misma FC).
+    Usa solo los resúmenes de Garmin (sin FIT): es barata aunque el rango sea largo.
+    """
+    start, end = _coach_parse_range(start_date, end_date, 400)
+    if not 0 < min_km <= max_km:
+        raise ValueError("Se requiere 0 < min_km <= max_km.")
+    needle = (name_contains or "").strip().lower()
+    rows: list[dict[str, Any]] = []
+    for a in _ca_list_activities(start.isoformat(), end.isoformat()):
+        if not _ca_is_running(a):
+            continue
+        dist, spd, hr = _ca_num(a.get("distance")), _ca_num(a.get("averageSpeed")), _ca_num(a.get("averageHR"))
+        if dist is None or spd is None or hr is None or spd <= 0 or hr <= 0:
+            continue
+        km = dist / 1000
+        if not min_km <= km <= max_km or (max_avg_hr is not None and hr > max_avg_hr):
+            continue
+        if needle and needle not in str(a.get("activityName") or "").lower():
+            continue
+        rows.append({"date": _ca_day(a), "activity_id": a.get("activityId"), "name": a.get("activityName"), "km": round(km, 2),
+                     "pace": _coach_pace(spd), "avg_hr": round(hr), "_spd": spd, "_hr": hr, "ef": round(spd * 60 / hr, 3)})
+    if not rows:
+        raise RuntimeError("Ninguna carrera cumple los filtros en ese rango.")
+    rows.sort(key=lambda r: r["date"])
+    d0 = date.fromisoformat(rows[0]["date"])
+    points = [((date.fromisoformat(r["date"]) - d0).days, r["_spd"] * 60 / r["_hr"]) for r in rows]
+    third = max(1, len(rows) // 3)
+
+    def summary(sel: list[dict[str, Any]]) -> dict[str, Any]:
+        sp, hr = sum(r["_spd"] for r in sel) / len(sel), sum(r["_hr"] for r in sel) / len(sel)
+        return {"from": sel[0]["date"], "to": sel[-1]["date"], "n": len(sel), "pace": _coach_pace(sp), "avg_hr": round(hr, 1), "ef": round(sp * 60 / hr, 3)}
+
+    first, last = summary(rows[:third]), summary(rows[-third:])
+    shown = rows[-60:]
+    for r in shown:
+        r.pop("_spd", None)
+        r.pop("_hr", None)
+    return {
+        "filtros": {"km": [min_km, max_km], "max_avg_hr": max_avg_hr, "name_contains": name_contains},
+        "n": len(rows), "first_third": first, "last_third": last,
+        "ef_change_pct": round((last["ef"] / first["ef"] - 1) * 100, 1) if first["ef"] else None,
+        "ef_slope_pct_per_30d": _ca_slope_pct_per_30d(points),
+        "runs": shown, "truncated": len(rows) > len(shown),
+    }
+# === COMPACT ANALYSIS TOOLS END ===
+
+
 # === PORTED TOOLS (Taxuspt/garmin_mcp) START ===
 # Herramientas portadas desde github.com/Taxuspt/garmin_mcp (MIT) y adaptadas al estilo de este servidor:
 # @mcp.tool síncrono, _get_api() bajo FETCH_LOCK y errores como RuntimeError.
