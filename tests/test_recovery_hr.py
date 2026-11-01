@@ -140,3 +140,41 @@ def test_trend_validations_and_empty(srv, monkeypatch):
         _fn(srv.get_recovery_hr_trend)("2026-09-01", max_activities=0)
     r = _fn(srv.get_recovery_hr_trend)("2025-01-01", "2025-01-31")
     assert r["count"] == 0 and r["mean_recovery_hr"] is None
+
+
+def test_hr_at_2min_reliable_short_last_lap(srv, monkeypatch):
+    api = _api()
+    api.laps["3"] = [{"averageHR": 140, "duration": 300.0}, {"averageHR": 136.0, "duration": 4.0}]
+    monkeypatch.setattr(srv, "_get_api", lambda: api)
+    a = _fn(srv.get_recovery_hr)(["3"])["activities"][0]
+    assert a["end_hr_reliable"] is True and a["hr_at_2min"] == 108
+
+
+def test_hr_at_2min_null_when_last_lap_long(srv, monkeypatch):
+    monkeypatch.setattr(srv, "_get_api", lambda: _api())  # activity 3: última vuelta de 62,5 s
+    a = _fn(srv.get_recovery_hr)(["3"])["activities"][0]
+    assert a["end_hr_reliable"] is False and a["hr_at_2min"] is None
+
+
+def test_hr_at_2min_boundary_30s_is_reliable(srv, monkeypatch):
+    api = _api()
+    api.laps["3"] = [{"averageHR": 140, "duration": 30.0}]
+    monkeypatch.setattr(srv, "_get_api", lambda: api)
+    assert _fn(srv.get_recovery_hr)(["3"])["activities"][0]["hr_at_2min"] == 112
+
+
+def test_hr_at_2min_null_without_recovery_or_laps(srv, monkeypatch):
+    api = FakeApi([], {"9": _detail(9, "2026-10-01", None), "8": _detail(8, "2026-10-01", 30)},
+                  {"9": [{"averageHR": 150, "duration": 2.0}]})
+    monkeypatch.setattr(srv, "_get_api", lambda: api)
+    rows = _fn(srv.get_recovery_hr)(["9", "8"])["activities"]
+    assert rows[0]["end_hr_reliable"] is True and rows[0]["hr_at_2min"] is None
+    assert rows[1]["end_hr_reliable"] is False and rows[1]["hr_at_2min"] is None
+
+
+def test_trend_includes_hr_at_2min(srv, monkeypatch):
+    api = _api()
+    api.laps["1"] = [{"averageHR": 147.0, "duration": 2.7}]
+    monkeypatch.setattr(srv, "_get_api", lambda: api)
+    r = _fn(srv.get_recovery_hr_trend)("2026-09-01", "2026-09-30", include_end_hr=True)
+    assert r["activities"][0]["hr_at_2min"] == 112
