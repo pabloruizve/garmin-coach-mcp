@@ -4,64 +4,38 @@ Servidor MCP que conecta Garmin Connect con Claude y ChatGPT — 137 herramienta
 
 ---
 
-## Tutorial paso a paso (desde cero, sin saber nada)
+## Puesta en marcha (Docker / Easypanel)
 
-Este tutorial asume que **no tienes ni idea** de GitHub ni Railway. Todo se hace en el navegador, en móvil o PC. Tiempo: ~10 minutos.
+El servidor es una app Python que se despliega con el `Dockerfile` del repo. Sirve igual en Easypanel, en cualquier VPS con Docker o en local.
 
 ### Lo que necesitas antes de empezar
-- Tu cuenta de **Garmin Connect** (la del reloj).
-- Una cuenta de **GitHub** (gratis). Si no tienes: ve a [github.com](https://github.com) → **Sign up**.
-- Una **IA con soporte de conectores MCP**: Claude, ChatGPT u otra compatible con MCP.
+- Tu cuenta de **Garmin Connect** (la del reloj) y acceso a su código MFA si lo tienes activo.
+- Un **fork** de este repo en tu cuenta de GitHub: <https://github.com/Alejandrlucena/garmin-coach-mcp> → **Fork**.
+- Un servidor con Docker (en Easypanel, un VPS tuyo).
+- Una **IA con soporte de conectores MCP**: Claude, ChatGPT u otra compatible.
 
----
+### Paso 1 · Crea la app desde tu fork
 
-### Paso 1 · Haz una copia del proyecto (fork)
+1. En Easypanel, crea una **App** nueva con origen **GitHub** y elige tu fork.
+2. Método de build: **Dockerfile** (el del repo).
+3. Puerto interno: **8000**.
+4. Añade un **volumen** montado en **`/data`**. Es imprescindible: ahí se guardan los tokens de Garmin, la contraseña del panel y los ajustes. Sin volumen se pierden en cada reinicio.
+5. Asigna un **dominio** a la app (con HTTPS) y despliega.
 
-Un "fork" es tu copia personal del proyecto en tu propia cuenta de GitHub.
+### Paso 2 · Configura todo desde el panel
 
-1. Abre el proyecto: <https://github.com/Alejandrlucena/garmin-coach-mcp>
-2. Arriba a la derecha, pulsa el botón **Fork**.
-3. En la pantalla que sale, pulsa **Create fork**.
-4. Ahora tienes tu copia en `https://github.com/TU-USUARIO/garmin-coach-mcp`.
+Abre tu dominio. Verás un **panel** con una lista de pasos:
 
-### Paso 2 · Crea tu cuenta de Railway (con GitHub)
-
-Railway es donde vivirá tu servidor (gratis para empezar).
-
-1. Ve a [railway.com](https://railway.com).
-2. Pulsa **Login** → **Login with GitHub**.
-3. Autoriza a Railway a acceder a tu GitHub (botón verde **Authorize**).
-
-### Paso 3 · Despliega tu copia
-
-1. En Railway, pulsa **New Project** (o **+ New**).
-2. Elige **Deploy from GitHub repo**.
-3. La primera vez te pedirá dar permiso: pulsa **Configure GitHub App** → marca tu fork `garmin-coach-mcp` (o "All repositories") → **Save**, y vuelve atrás.
-4. Selecciona tu repo `garmin-coach-mcp` en la lista.
-5. Railway detecta el `Dockerfile` y empieza a construir solo. Espera a que el deploy se ponga **Active** (verde). Tarda 2-5 min.
-
-### Paso 4 · Consigue la dirección web de tu servidor
-
-1. Cuando esté **Active**, entra en tu servicio.
-2. Ve a **Settings** → sección **Networking** → pulsa **Generate Domain**.
-3. Si te pregunta un puerto, pon **8000**.
-4. Te dará una dirección tipo `https://tu-proyecto.up.railway.app`. **Esa es tu web.**
-
-### Paso 5 · Configura todo desde el panel
-
-Abre tu dirección web. Verás un **panel** con una lista de pasos:
-
-1. **Conectar Garmin** → email + contraseña + el código que te llega al Gmail (MFA).
-2. **Guardado permanente** → tras loguearte, el panel te da un bloque de texto para pegar en Railway → Variables → Raw Editor. Guarda y redespliega. Si Railway inyectó automáticamente el `RAILWAY_API_TOKEN`, se marca solo sin que hagas nada.
-3. **Protección con contraseña** → eliges una contraseña para que solo tú puedas abrir el panel.
+1. **Conectar Garmin** → email + contraseña + el código MFA que te llega al correo.
+2. **Protección con contraseña** → eliges una contraseña para que solo tú puedas abrir el panel.
 
 Cada paso se pone en **verde ✅** cuando está hecho. El panel se refresca solo cada pocos segundos.
 
-### Paso 6 · Conéctalo a tu IA (Claude, ChatGPT, etc.)
+### Paso 3 · Conéctalo a tu IA (Claude, ChatGPT, etc.)
 
 Funciona con cualquier IA que acepte conectores MCP.
 
-1. En el panel, pulsa **Copiar URL del conector** (es `https://tu-proyecto.up.railway.app/mcp`).
+1. En el panel, pulsa **Copiar URL del conector** (es `https://tu-dominio/mcp`).
 2. En tu IA, ve a la sección de conectores/MCP y añade un conector personalizado:
    - **Claude**: Settings → **Connectors** → **Add custom connector**.
    - **ChatGPT**: Settings → **Connectors** (MCP) → añadir servidor.
@@ -69,12 +43,16 @@ Funciona con cualquier IA que acepte conectores MCP.
 3. Pega la URL → guarda.
 4. Listo. Ya puedes pedirle tus métricas de Garmin.
 
+### Actualizar el servidor
+
+Cuando se mergee un cambio en tu fork, vuelve a **desplegar** la app en Easypanel. Las herramientas nuevas aparecen en tu IA después de refrescar la lista de herramientas del conector.
+
 ---
 
 ### ¿Necesitas re-loguearte en el futuro?
 
 Cuando Garmin caduque tu sesión (raro, ~1 año) o cambies de contraseña en Garmin:
-- Abre tu panel (te pedirá tu contraseña), pulsa **Re-loguear Garmin** y repite el Paso 5.1. Desde el móvil, en 1 minuto.
+- Abre tu panel (te pedirá tu contraseña), pulsa **Re-loguear Garmin** y repite el Paso 2.1. Desde el móvil, en 1 minuto.
 
 ---
 
@@ -83,17 +61,15 @@ Cuando Garmin caduque tu sesión (raro, ~1 año) o cambies de contraseña en Gar
 ### El recorrido completo
 
 ```
-①  Fork en GitHub  +  Deploy en Railway
+①  Fork en GitHub  +  App en Easypanel (Dockerfile, puerto 8000, volumen /data)
         │
 ②  Abrir la URL  ───────────►   aparece el Panel de estado
         │
 ③  [Conectar Garmin]            email · contraseña · código MFA
         │
-④  [Guardado permanente]        pegar token en Railway Variables
+④  [Protección]                 elegir contraseña (con ojito 👁)
         │
-⑤  [Protección]                 elegir contraseña (con ojito 👁)
-        │
-⑥  Copiar URL /mcp  ────────►   pegar en Claude / ChatGPT
+⑤  Copiar URL /mcp  ────────►   pegar en Claude / ChatGPT
         │
       ✅  Listo
 ```
@@ -107,14 +83,12 @@ Garmin Coach MCP · Panel de estado
 Estado del setup
   ✅  Servidor desplegado          Activo y respondiendo
   ✅  Garmin conectado             Tokens válidos, caché al día
-  ✅  ⚠️  Guardado permanente      Activado / Sin configurar
   ✅  ⚠️  Protección con contraseña  Activada / [Activar]
   ✅  IA conectada / durmiendo / lista  Según uso
 
 Acciones
   [ Re-loguear Garmin ]
   [ Copiar URL del conector ]
-  [ Abrir Railway Variables ]
   [ Bloquear sesión ]
 ```
 
@@ -146,11 +120,9 @@ Introduce tu contraseña para acceder.
 
 Todo se hace desde el navegador, sin terminal. El servidor sirve un panel en `/` con asistentes guiados:
 
-- **`/` (panel de estado)**: muestra cada paso del setup (servidor, Garmin, guardado permanente, protección, Claude) en verde ✅ o pendiente ⚠️, con su botón de acción.
-- **Conectar Garmin**: reemplaza a `login_once.py`. Email + contraseña + MFA, todo web, en 3 pasos.
-- **Guardado permanente**: pega un Railway API token; el servidor guarda `GARMIN_TOKENS_JSON` y `RAILWAY_API_TOKEN` en Railway vía su API (usando `curl_cffi` para pasar Cloudflare). Cero copy-paste manual de variables.
-- **Protección con contraseña**: eliges tu propia contraseña (o generas una al azar). El servidor la guarda en Railway (`ADMIN_TOKEN`) **y** en un archivo local que lee en vivo → los cambios de contraseña son **instantáneos, sin reiniciar el servidor**.
-- **Auto-sync opcional**: con `AUTO_SYNC_TOKENS=1`, un hilo de fondo sincroniza el token maestro a Railway si rota.
+- **`/` (panel de estado)**: muestra cada paso del setup (servidor, Garmin, protección, IA) en verde ✅ o pendiente ⚠️, con su botón de acción.
+- **Conectar Garmin**: reemplaza a `login_once.py`. Email + contraseña + MFA, todo web, en 3 pasos. Los tokens se guardan en el volumen (`/data/garmin`).
+- **Protección con contraseña**: eliges tu propia contraseña (o generas una al azar). El servidor la guarda en un archivo del volumen que lee en vivo → los cambios de contraseña son **instantáneos, sin reiniciar el servidor** y sobreviven a reinicios mientras el volumen exista.
 
 ### Detalles del acceso por contraseña
 
@@ -158,14 +130,14 @@ Todo se hace desde el navegador, sin terminal. El servidor sirve un panel en `/`
 - **Sesión deslizante**: tras entrar, el navegador te recuerda 365 días y renueva el plazo en cada visita (como Instagram/X/TikTok). No te pide la contraseña una y otra vez.
 - **Bloquear sesión**: botón en el panel que borra la cookie; la próxima visita vuelve a pedir contraseña (útil en equipos compartidos).
 - **Cambiar contraseña**: botón **Cambiar** en la fila de Protección. Aplica al instante.
-- **¿Olvidaste la contraseña?**: la pantalla de bloqueo incluye un desplegable con enlace directo a las Variables de Railway, donde está/cambias `ADMIN_TOKEN`.
+- **¿Olvidaste la contraseña?**: si la pierdes, está en el fichero `admin_token` de la carpeta de tokens (`/data/garmin/admin_token`) o, si ese fichero no existe, en la variable `ADMIN_TOKEN` de tu app.
 
 ---
 
 ## Flujo técnico
 
 ```
-Garmin Connect → garminconnect (Python) → server.py → Railway → Claude / Web / Móvil
+Garmin Connect → garminconnect (Python) → server.py (Docker) → Claude / Web / Móvil
 ```
 
 ---
@@ -178,7 +150,6 @@ Garmin Connect → garminconnect (Python) → server.py → Railway → Claude /
 | `GET /lock` | Cierra la sesión del panel (borra la cookie) |
 | `GET /login` | Wizard web para conectar / re-loguear en Garmin |
 | `POST /login/submit` · `GET /login/wait` · `GET/POST /login/mfa` · `GET /login/result` | Pasos internos del wizard (envío de credenciales, espera, código MFA, resultado) |
-| `GET/POST /setup/persistencia` | Asistente para activar el guardado permanente (Railway API token) |
 | `GET/POST /setup/proteccion` | Asistente para poner / cambiar la contraseña del panel |
 | `GET /health` | Estado del servidor y del caché |
 | `GET /dashboard/rows` · `GET /dashboard/deploy-status` | Fragmentos que el panel refresca solo: filas de estado y estado del despliegue |
@@ -197,13 +168,11 @@ Garmin Connect → garminconnect (Python) → server.py → Railway → Claude /
 
 Todos los endpoints incluyen CORS completo (`allow_origins=["*"]`).
 
-Si defines `RAILWAY_FALLBACK_URL` (vacío por defecto), `/activities` y `/download` pueden reenviar a otra instancia cuando fallan los tokens locales. En despliegues normales no hace falta.
-
 ---
 
 ## Instalación local (solo para desarrollo)
 
-Solo necesitas esto si vas a modificar el código. Para uso normal, sigue el Quick Start de arriba.
+Solo necesitas esto si vas a modificar el código. Para uso normal, sigue la «Puesta en marcha» de arriba.
 
 ```bash
 git clone https://github.com/Alejandrlucena/garmin-coach-mcp.git
@@ -218,45 +187,34 @@ python server.py              # → http://localhost:8000
 
 ## Variables de entorno
 
-> No necesitas poner ninguna a mano: los asistentes web del panel las configuran por ti. Esta tabla es solo de referencia.
+> Con el volumen montado en `/data` no necesitas poner ninguna a mano: el panel guarda los tokens de Garmin y la contraseña en archivos del volumen. Esta tabla es de referencia.
 
-### Gestionadas por los asistentes web
+### Alternativa a los archivos del volumen
 | Variable | Descripción |
 |----------|-------------|
-| `GARMIN_TOKENS_JSON` | Tokens de Garmin (JSON o base64). La crea y actualiza el wizard de "Conectar Garmin". |
-| `RAILWAY_API_TOKEN` | Token de Railway para que los asistentes guarden variables solos. Lo configura "Guardado permanente". |
-| `ADMIN_TOKEN` | Contraseña del panel. La pone/cambia el asistente "Protección con contraseña". Mientras no exista, el panel está abierto (sin contraseña); una vez existe, el panel la pide. |
+| `GARMIN_TOKENS_JSON` | Tokens de Garmin (JSON o base64), como alternativa al fichero que crea el wizard de "Conectar Garmin". |
+| `ADMIN_TOKEN` | Contraseña del panel, como alternativa al fichero que escribe el asistente "Protección con contraseña". Mientras no exista ninguna, el panel está abierto (sin contraseña); una vez existe, el panel la pide. |
 
 ### Opcionales
 | Variable | Por defecto | Descripción |
 |----------|-------------|-------------|
-| `PORT` | `8000` | Puerto del servidor (Railway lo asigna) |
+| `PORT` | `8000` | Puerto del servidor |
 | `GARMIN_EMAIL` | _(vacío)_ | Email de Garmin; solo se usa si no hay tokens guardados |
 | `GARMIN_TOKEN_DIR` | `~/.garminconnect` | Carpeta de tokens en local |
 | `RESET_GARMIN_TOKENS` | `0` | Si `1` y hay `GARMIN_TOKENS_JSON`, sobrescribe el fichero de tokens local con esa variable al arrancar |
 | `GARMIN_DISABLE_PORTED_WRITES` | _(vacío)_ | Si `1`, las tools que escriben en tu cuenta (ver «Herramientas que escriben») se registran pero devuelven error |
 | `RECOVERY_MAX_FRESH_MINUTES` | `360` | Minutos tras los que el dato de recuperación del reloj se considera caducado |
 | `RECOVERY_CROSS_DAY_STALE_MINUTES` | `180` | Igual, pero si el dato es de un día anterior |
-| `RAILWAY_VOLUME_MOUNT_PATH` | `/data` | Carpeta persistente donde se guardan `/config`, `/adj`, etc. |
 | `GARMIN_TIMEZONE` | `Europe/Madrid` | Zona horaria local |
 | `GARMIN_LANGUAGE` | `es` | Idioma de traducciones |
 | `CACHE_MINUTES` | `30` | Minutos entre refresco de caché |
 | `ACTIVITY_LIMIT` | `8` | Límite de actividades en caché |
-| `AUTO_SYNC_TOKENS` | `0` | Si `1`, sincroniza el OAuth1 rotado a Railway cada 12h |
-| `AUTO_SYNC_INTERVAL_SECONDS` | `43200` | Intervalo del auto-sync (mínimo 3600) |
-| `RAILWAY_FALLBACK_URL` | _(vacío)_ | Opcional: reenvía a otra instancia si fallan los tokens locales |
-
-### Inyectadas automáticamente por Railway (no las pongas tú)
-- `RAILWAY_PROJECT_ID`, `RAILWAY_ENVIRONMENT_ID`, `RAILWAY_SERVICE_ID`, `RAILWAY_PUBLIC_DOMAIN`
-
-### Fuera de Railway (VPS, Easypanel, Docker)
-El `Dockerfile` no depende de Railway: arranca `python server.py`, escucha en `PORT` (8000 por defecto) y usa `/data` como carpeta persistente, así que en cualquier plataforma que ejecute Docker hay que montar un volumen en `/data` y pasar las variables de la tabla. Los asistentes del panel que escriben variables vía API de Railway (**Guardado permanente**) solo aplican en Railway; en otras plataformas, esos pasos no están disponibles: configura las variables a mano en el panel de tu plataforma.
 
 ---
 
 ## Configuración web persistente (`/config`)
 
-El endpoint `/config` almacena la URL del Google Apps Script de Drive en el volumen de Railway (`/data/web_config.json`). Esto permite que el visualizador web sincronice su configuración automáticamente en todos los dispositivos: basta con introducir la URL del servidor una sola vez y la URL de Drive se carga sola.
+El endpoint `/config` almacena la URL del Google Apps Script de Drive en el volumen (`/data/web_config.json`). Esto permite que el visualizador web sincronice su configuración automáticamente en todos los dispositivos: basta con introducir la URL del servidor una sola vez y la URL de Drive se carga sola.
 
 - `GET /config` — devuelve `{"driveUrl": "..."}` o `{}`
 - `POST /config` — acepta `{"driveUrl": "..."}` y lo persiste en disco
@@ -267,12 +225,12 @@ Solo se permite la clave `driveUrl`. No se almacena ningún dato de usuario ni c
 
 ## Ajustes de actividad persistentes (`/adj/`)
 
-El endpoint `/adj/{activity_id}` permite al visualizador web [garmin-laps](https://github.com/Alejandrlucena/garmin-laps) persistir ajustes de distancia, ritmo y velocidad para cada actividad. Los datos se guardan en el volumen de Railway (`/data/adj/{activity_id}.json`).
+El endpoint `/adj/{activity_id}` permite al visualizador web [garmin-laps](https://github.com/Alejandrlucena/garmin-laps) persistir ajustes de distancia, ritmo y velocidad para cada actividad. Los datos se guardan en el volumen (`/data/adj/{activity_id}.json`).
 
 - `GET /adj/{activity_id}` — devuelve `{"dist":"12.5","pace":"4:12"}` o `{}` si no hay ajustes
 - `POST /adj/{activity_id}` — acepta un JSON con los campos ajustados (`dist`, `pace`, `speed`, etc.) y lo persiste en disco
 
-Esto permite que los ajustes sobrevivan a recargas de página y se sincronicen entre dispositivos conectados al mismo servidor Railway.
+Esto permite que los ajustes sobrevivan a recargas de página y se sincronicen entre dispositivos conectados al mismo servidor.
 
 ---
 
@@ -280,7 +238,7 @@ Esto permite que los ajustes sobrevivan a recargas de página y se sincronicen e
 
 El visualizador [garmin-laps](https://github.com/Alejandrlucena/garmin-laps) tiene un botón **🔌 Conector** que carga la actividad con un clic y renderiza la tabla directamente. Cada usuario configura la URL de su propio servidor en **⚙ Configurar**.
 
-- Despliega este repo en Railway, copia la URL que te dé y pégala en **⚙**
+- Despliega este repo, copia la URL de tu app y pégala en **⚙**
 - O arranca el servidor en local (`http://localhost:8000`) — sirve el `index.html` directamente, sin problemas de CORS
 - Soporta running, ciclismo y motorsport (moto, coche, kart) — el visualizador adapta las columnas según el tipo de actividad
 - Filtros de tipo en el panel: 🗂️ Todo · 🏃 Running · 🚴 Ciclismo · 🏍️ Motorsport 🏎️ (busca entre las últimas 500 actividades)
@@ -356,8 +314,6 @@ python -m pytest tests -q      # sin red: usan una API de Garmin simulada
 | `tests/` | Tests con `pytest` y una API simulada (herramientas de análisis, portadas y FC de recuperación) |
 | `login_once.py` | Script para autenticar y generar tokens locales |
 | `requirements.txt` | Dependencias Python |
-| `Dockerfile` | Para despliegue en Railway |
-| `railway.toml` | Configuración Railway |
-| `bootstrap.sh` | Script de inicio en Railway |
+| `Dockerfile` | Imagen para desplegar (Easypanel, Docker, VPS) |
 | `.env.example` | Variables de entorno de ejemplo |
 
