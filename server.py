@@ -11065,8 +11065,12 @@ def get_comparable_runs(
 # --- FC de recuperación (2 min) compacta: una llamada ligera por actividad, sin vueltas ni FIT ---
 _RECOVERY_HR_NOTE = (
     "recovery_hr es null cuando Garmin no midió los 2 min posteriores "
-    "(p. ej. no te quedaste quieto con el reloj puesto)."
+    "(p. ej. no te quedaste quieto con el reloj puesto). "
+    "hr_at_2min = last_lap_avg_hr - recovery_hr, solo si la última vuelta dura <= 30 s "
+    "(end_hr_reliable); si es más larga, la FC final no es fiable y hr_at_2min es null."
 )
+# Última vuelta más larga que esto: su FC media mezcla trote/parada y no representa la FC al terminar.
+_END_HR_MAX_LAP_S = 30.0
 
 
 def _last_lap_hr(api: Garmin, activity_id: str) -> tuple[float | None, float | None]:
@@ -11101,6 +11105,12 @@ def _recovery_hr_row(api: Garmin, activity_id: str, include_end_hr: bool) -> dic
     if include_end_hr:
         hr, dur = _last_lap_hr(api, activity_id)
         row["last_lap_avg_hr"], row["last_lap_s"] = hr, dur
+        reliable = dur is not None and dur <= _END_HR_MAX_LAP_S
+        row["end_hr_reliable"] = reliable
+        rec = row["recovery_hr"]
+        row["hr_at_2min"] = (
+            round(hr - rec) if reliable and hr is not None and isinstance(rec, (int, float)) else None
+        )
     return row
 
 
@@ -11110,8 +11120,8 @@ def get_recovery_hr(activity_ids: list[str], include_end_hr: bool = True) -> dic
     el resto de datos (alternativa ligera a get_activity_full).
     Devuelve por actividad: fecha, nombre, km, FC media/máx y recovery_hr (null si Garmin no la midió).
     include_end_hr añade last_lap_avg_hr y last_lap_s (FC media y duración de la última vuelta): sirve de
-    aproximación a la FC al terminar, para estimar la FC absoluta a los 2 min (FC final - recovery_hr).
-    Cuanto más corta la última vuelta, mejor la aproximación."""
+    aproximación a la FC al terminar. Añade también end_hr_reliable (última vuelta <= 30 s) y hr_at_2min
+    (FC absoluta a los 2 min = FC final - recovery_hr; null si no es fiable o no hay recovery_hr)."""
     ids = [str(a).strip() for a in (activity_ids or []) if str(a).strip()]
     if not 1 <= len(ids) <= 10:
         raise ValueError("Indica entre 1 y 10 activity_ids.")
@@ -11131,7 +11141,7 @@ def get_recovery_hr_trend(
 ) -> dict:
     """Tendencia de FC de recuperación (2 min) entre dos fechas (YYYY-MM-DD), de más antigua a más reciente.
     activity_type: running por defecto; vacío para todos los tipos. Máx. 60 actividades (las más recientes).
-    include_end_hr añade la FC de la última vuelta (una llamada más por actividad).
+    include_end_hr añade la FC de la última vuelta, end_hr_reliable y hr_at_2min (una llamada más por actividad).
     Un dato suelto no dice nada: compara sesiones del mismo tipo y con FC final parecida."""
     if not 1 <= max_activities <= 60:
         raise ValueError("max_activities entre 1 y 60.")
