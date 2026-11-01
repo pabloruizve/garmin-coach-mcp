@@ -1,6 +1,6 @@
 # Garmin Coach MCP
 
-Servidor MCP que conecta Garmin Connect con Claude y ChatGPT — 95 herramientas, datos en tiempo real · by AlejandrLucena
+Servidor MCP que conecta Garmin Connect con Claude y ChatGPT — 137 herramientas, datos en tiempo real · by AlejandrLucena
 
 ---
 
@@ -177,16 +177,23 @@ Garmin Connect → garminconnect (Python) → server.py → Railway → Claude /
 | `GET /` | Panel de estado y configuración (pide contraseña si está protegido) |
 | `GET /lock` | Cierra la sesión del panel (borra la cookie) |
 | `GET /login` | Wizard web para conectar / re-loguear en Garmin |
+| `POST /login/submit` · `GET /login/wait` · `GET/POST /login/mfa` · `GET /login/result` | Pasos internos del wizard (envío de credenciales, espera, código MFA, resultado) |
 | `GET/POST /setup/persistencia` | Asistente para activar el guardado permanente (Railway API token) |
 | `GET/POST /setup/proteccion` | Asistente para poner / cambiar la contraseña del panel |
 | `GET /health` | Estado del servidor y del caché |
+| `GET /dashboard/rows` · `GET /dashboard/deploy-status` | Fragmentos que el panel refresca solo: filas de estado y estado del despliegue |
 | `GET /activities?limit=30` | Lista de actividades recientes (JSON) con CORS |
 | `GET /download/{activity_id}` | Descarga el .zip/.fit de una actividad con CORS |
 | `GET /config` · `POST /config` | Configuración web persistida (solo clave `driveUrl`) |
+| `POST /config/share` · `GET /config/share/{share_id}` | Crea / lee una configuración compartida (se guarda en disco con un ID aleatorio) |
+| `GET /adj` · `DELETE /adj` | Lista todos los ajustes guardados (con uso de disco) / los borra todos |
 | `GET /adj/{activity_id}` | Obtiene los ajustes guardados de distancia/ritmo/vel para una actividad |
-| `POST /adj/{activity_id}` | Guarda ajustes de distancia/ritmo/vel para una actividad (persiste en volumen Railway) |
+| `POST /adj/{activity_id}` | Guarda ajustes de distancia/ritmo/vel para una actividad (persiste en el volumen) |
+| `DELETE /adj/{activity_id}` | Borra los ajustes de una actividad |
+| `GET /hrmax/candidates?start_date=...` | Carreras del rango con `maxHR` alto y pico sostenido calculado desde el FIT (candidatas a FCmáx; pensado para un job semanal de n8n) |
 | `POST /mcp` | Endpoint MCP principal para Claude |
 | `GET /debug/activities` · `GET /debug/audit` | Debug: actividades / métricas del caché |
+| `GET /debug/sleep-freshness` · `GET /debug/sleep-selection` | Debug: frescura y selección del dato de sueño en el snapshot |
 
 Todos los endpoints incluyen CORS completo (`allow_origins=["*"]`).
 
@@ -224,7 +231,13 @@ python server.py              # → http://localhost:8000
 | Variable | Por defecto | Descripción |
 |----------|-------------|-------------|
 | `PORT` | `8000` | Puerto del servidor (Railway lo asigna) |
+| `GARMIN_EMAIL` | _(vacío)_ | Email de Garmin; solo se usa si no hay tokens guardados |
 | `GARMIN_TOKEN_DIR` | `~/.garminconnect` | Carpeta de tokens en local |
+| `RESET_GARMIN_TOKENS` | `0` | Si `1` y hay `GARMIN_TOKENS_JSON`, sobrescribe el fichero de tokens local con esa variable al arrancar |
+| `GARMIN_DISABLE_PORTED_WRITES` | _(vacío)_ | Si `1`, las tools que escriben en tu cuenta (ver «Herramientas que escriben») se registran pero devuelven error |
+| `RECOVERY_MAX_FRESH_MINUTES` | `360` | Minutos tras los que el dato de recuperación del reloj se considera caducado |
+| `RECOVERY_CROSS_DAY_STALE_MINUTES` | `180` | Igual, pero si el dato es de un día anterior |
+| `RAILWAY_VOLUME_MOUNT_PATH` | `/data` | Carpeta persistente donde se guardan `/config`, `/adj`, etc. |
 | `GARMIN_TIMEZONE` | `Europe/Madrid` | Zona horaria local |
 | `GARMIN_LANGUAGE` | `es` | Idioma de traducciones |
 | `CACHE_MINUTES` | `30` | Minutos entre refresco de caché |
@@ -234,7 +247,10 @@ python server.py              # → http://localhost:8000
 | `RAILWAY_FALLBACK_URL` | _(vacío)_ | Opcional: reenvía a otra instancia si fallan los tokens locales |
 
 ### Inyectadas automáticamente por Railway (no las pongas tú)
-- `RAILWAY_PROJECT_ID`, `RAILWAY_ENVIRONMENT_ID`, `RAILWAY_SERVICE_ID`
+- `RAILWAY_PROJECT_ID`, `RAILWAY_ENVIRONMENT_ID`, `RAILWAY_SERVICE_ID`, `RAILWAY_PUBLIC_DOMAIN`
+
+### Fuera de Railway (VPS, Easypanel, Docker)
+El `Dockerfile` no depende de Railway: arranca `python server.py`, escucha en `PORT` (8000 por defecto) y usa `/data` como carpeta persistente, así que en cualquier plataforma que ejecute Docker hay que montar un volumen en `/data` y pasar las variables de la tabla. Los asistentes del panel que escriben variables vía API de Railway (**Guardado permanente**) solo aplican en Railway; en otras plataformas, esos pasos no están disponibles: configura las variables a mano en el panel de tu plataforma.
 
 ---
 
@@ -272,22 +288,22 @@ El visualizador [garmin-laps](https://github.com/Alejandrlucena/garmin-laps) tie
 
 ---
 
-## Herramientas MCP (95)
+## Herramientas MCP (137)
 
 ### Snapshot y caché
-`get_day_snapshot` · `get_cached_snapshot` · `get_raw_sources` · `get_cache_status` · `refresh_snapshot` · `get_window_rollup`
+`get_day_snapshot` · `get_cached_snapshot` · `get_raw_sources` · `refresh_snapshot` · `get_window_rollup`
 
 ### Actividades
-`get_recent_activities` · `get_recent_activities_full` · `get_recent_activities_catalog` · `get_recent_activities_all_data` · `get_activities_paged` · `get_activities_in_range` · `get_last_activity` · `get_activity_full` · `get_activity_all_data` · `get_activity_sport_profile` · `get_activity_visible_profile` · `get_activity_splits` · `get_activity_split_summaries` · `get_activity_time_series` · `get_activity_hr_in_timezones` · `get_activity_evaluation` · `get_activity_exercise_sets` · `get_activity_gear` · `get_activity_weather` · `get_activity_types` · `get_recent_activity_sport_profiles` · `get_activity_fit_download` · `download_activity` · `upload_activity`
+`get_recent_activities` · `get_recent_activities_full` · `get_recent_activities_catalog` · `get_recent_activities_all_data` · `get_activities_paged` · `get_activities_in_range` · `get_last_activity` · `get_activity_full` · `get_activity_all_data` · `get_activity_sport_profile` · `get_activity_visible_profile` · `get_activity_splits` · `get_activity_split_summaries` · `get_activity_time_series` · `get_activity_hr_in_timezones` · `get_activity_evaluation` · `get_activity_exercise_sets` · `get_activity_gear` · `get_activity_weather` · `get_activity_types` · `get_recent_activity_sport_profiles` · `get_activity_fit_download` · `download_activity` · `upload_activity` · `get_activity_fit_messages` · `get_activity_hr_peak` · `get_activity_typed_splits` · `get_activity_self_assessment` · `set_activity_name` · `set_activity_description` · `set_activity_type` · `set_perceived_effort` · `set_activity_feel` · `add_gear_to_activity` · `remove_gear_from_activity`
 
 ### Métricas diarias
-`get_stats` · `get_stats_and_body` · `get_daily_wellness` · `get_user_summary` · `get_steps_data` · `get_daily_steps` · `get_floors` · `get_all_day_stress` · `get_stress_data` · `get_heart_rates` · `get_rhr_day` · `get_body_battery` · `get_respiration_data` · `get_spo2_data` · `get_hydration_data` · `get_blood_pressure` · `get_body_composition`
+`get_stats` · `get_stats_and_body` · `get_daily_wellness` · `get_user_summary` · `get_steps_data` · `get_daily_steps` · `get_floors` · `get_all_day_stress` · `get_stress_data` · `get_heart_rates` · `get_rhr_day` · `get_body_battery` · `get_respiration_data` · `get_spo2_data` · `get_hydration_data` · `get_blood_pressure` · `get_body_composition` · `get_stats_range`
 
 ### Sueño y recuperación
-`get_sleep_data` · `get_hrv_data` · `get_training_readiness` · `get_wellness_range`
+`get_sleep_data` · `get_hrv_data` · `get_training_readiness` · `get_wellness_range` · `get_sleep_summary_range` · `get_hrv_trend` · `get_morning_training_readiness` · `get_recovery_time_remaining` · `get_respiration_trend`
 
 ### Entrenamiento y rendimiento
-`get_training_status` · `get_max_metrics` · `get_endurance_score` · `get_hill_score` · `get_race_predictions` · `get_personal_records` · `get_progress_summary` · `get_primary_device_info` · `get_fitness_age`
+`get_training_status` · `get_max_metrics` · `get_endurance_score` · `get_hill_score` · `get_race_predictions` · `get_personal_records` · `get_progress_summary` · `get_primary_device_info` · `get_fitness_age` · `get_training_effect` · `get_lactate_threshold` · `get_heart_rate_zones` · `get_vo2max_trend` · `get_training_load_trend` · `get_training_load_balance` · `get_running_tolerance_trend` · `get_weekly_intensity_minutes`
 
 ### Dispositivos y equipamiento
 `get_devices` · `get_device_settings` · `get_device_last_used` · `get_device_alarms` · `get_gear` · `get_gear_defaults` · `get_gear_stats` · `set_gear_default`
@@ -299,7 +315,7 @@ El visualizador [garmin-laps](https://github.com/Alejandrlucena/garmin-laps) tie
 `get_goals` · `get_earned_badges` · `get_available_badge_challenges` · `get_badge_challenges` · `get_adhoc_challenges` · `get_inprogress_virtual_challenges` · `get_non_completed_badge_challenges`
 
 ### Workouts y planes
-`get_workout_library` · `get_workout_detail` · `get_todays_workout` · `get_scheduled_workouts` · `schedule_workout` · `unschedule_workout` · `get_training_plans` · `get_training_plan_detail`
+`get_workout_library` · `get_workout_detail` · `get_todays_workout` · `get_scheduled_workouts` · `schedule_workout` · `unschedule_workout` · `get_training_plans` · `get_training_plan_detail` · `get_workout_compact` · `get_garmin_coach_workouts` · `get_calendar_range` · `get_calendar_events` · `preview_running_workout` · `create_running_workout` · `update_running_workout` · `delete_workout` · `delete_workouts` · `schedule_workouts` · `unschedule_workouts` · `reschedule_workout`
 
 ### Nutrición
 `get_nutrition_log`
@@ -307,16 +323,37 @@ El visualizador [garmin-laps](https://github.com/Alejandrlucena/garmin-laps) tie
 ### Perfil de usuario
 `get_user_profile_info`
 
+### Análisis compacto (datos ya calculados, sin cargar la actividad entera)
+- `get_time_in_zones`: tiempo en tus 3 zonas de FC (por defecto 140/165) en un rango, con comparación contra la distribución objetivo.
+- `get_weekly_summary`: km, minutos, carga, sesiones duras, descansos y planificado vs. ejecutado por semana (lunes–domingo).
+- `get_cardiac_drift`: deriva cardiaca (ritmo/FC) de una sesión, 1.ª mitad frente a 2.ª.
+- `get_comparable_runs`: evolución de ritmo y FC en carreras comparables (misma franja de distancia).
+- `get_recovery_hr`: FC de recuperación (caída de ppm a los 2 min) de hasta 10 actividades por ID. Con `include_end_hr` añade `last_lap_avg_hr`, `end_hr_reliable` (última vuelta ≤ 30 s) y `hr_at_2min` (FC final − caída; `null` si no es fiable).
+- `get_recovery_hr_trend`: lo mismo para un rango de fechas, de más antigua a más reciente, con la media (máx. 60 actividades).
+
+### Herramientas que escriben en tu cuenta de Garmin
+`set_activity_name` · `set_activity_description` · `set_activity_type` · `set_perceived_effort` · `set_activity_feel` · `add_gear_to_activity` · `remove_gear_from_activity` · `schedule_workout` · `unschedule_workout` · `schedule_workouts` · `unschedule_workouts` · `reschedule_workout` · `create_running_workout` · `update_running_workout` · `delete_workout` · `delete_workouts` · `upload_activity` · `add_weigh_in` · `delete_weigh_in` · `delete_weigh_ins` · `set_gear_default`
+
+Con `GARMIN_DISABLE_PORTED_WRITES=1` se desactivan `set_activity_*`, `set_perceived_effort`, `set_activity_feel`, `add_gear_to_activity`, `remove_gear_from_activity`, `schedule_workouts`, `unschedule_workouts`, `delete_workouts` y `reschedule_workout`. Las demás de esta lista no están cubiertas por ese interruptor.
+
 ### Hybrid Coach (Claude-native)
 `get_hybrid_user_briefing` · `get_hybrid_coach_snapshot` · `get_hybrid_coach_decision` · `get_hybrid_recent_overview` · `get_hybrid_nutrition_briefing`
 
 ---
+
+## Tests
+
+```bash
+pip install -r requirements.txt pytest
+python -m pytest tests -q      # sin red: usan una API de Garmin simulada
+```
 
 ## Archivos
 
 | Archivo | Descripción |
 |---------|-------------|
 | `server.py` | Servidor principal — tools MCP + endpoints HTTP |
+| `tests/` | Tests con `pytest` y una API simulada (herramientas de análisis, portadas y FC de recuperación) |
 | `login_once.py` | Script para autenticar y generar tokens locales |
 | `requirements.txt` | Dependencias Python |
 | `Dockerfile` | Para despliegue en Railway |
