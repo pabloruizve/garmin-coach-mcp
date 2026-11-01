@@ -11060,6 +11060,112 @@ def get_comparable_runs(
         "ef_slope_pct_per_30d": _ca_slope_pct_per_30d(points),
         "runs": shown, "truncated": len(rows) > len(shown),
     }
+
+
+# --- FC de recuperación (2 min) compacta: una llamada ligera por actividad, sin vueltas ni FIT ---
+_RECOVERY_HR_NOTE = (
+    "recovery_hr es null cuando Garmin no midió los 2 min posteriores "
+    "(p. ej. no te quedaste quieto con el reloj puesto)."
+)
+
+
+def _last_lap_hr(api: Garmin, activity_id: str) -> tuple[float | None, float | None]:
+    """FC media y duración (s) de la última vuelta. Aproxima la FC al terminar:
+    cuanto más corta sea la última vuelta, mejor aproximación."""
+    splits, _ = _call_with_retries(api, "get_activity_splits", activity_id, retries=1)
+    laps = splits.get("lapDTOs") if isinstance(splits, dict) else None
+    for lap in reversed(laps or []):
+        hr = lap.get("averageHR") if isinstance(lap, dict) else None
+        if isinstance(hr, (int, float)):
+            dur = lap.get("duration")
+            return float(hr), round(float(dur), 1) if isinstance(dur, (int, float)) else None
+    return None, None
+
+
+def _recovery_hr_row(api: Garmin, activity_id: str, include_end_hr: bool) -> dict:
+    activity, err = _call_with_retries(api, "get_activity", activity_id, retries=1)
+    if not isinstance(activity, dict):
+        return {"activity_id": activity_id, "error": err or "No pude leer la actividad"}
+    summary = activity.get("summaryDTO") or {}
+    distance_m = summary.get("distance")
+    start = summary.get("startTimeLocal") or activity.get("startTimeLocal") or ""
+    row = {
+        "activity_id": activity_id,
+        "date": str(start)[:10] or None,
+        "name": activity.get("activityName"),
+        "distance_km": round(float(distance_m) / 1000, 2) if distance_m is not None else None,
+        "avg_hr": summary.get("averageHR"),
+        "max_hr": summary.get("maxHR"),
+        "recovery_hr": summary.get("recoveryHeartRate"),
+    }
+    if include_end_hr:
+        hr, dur = _last_lap_hr(api, activity_id)
+        row["last_lap_avg_hr"], row["last_lap_s"] = hr, dur
+    return row
+
+
+@mcp.tool
+def get_recovery_hr(activity_ids: list[str], include_end_hr: bool = True) -> dict:
+    """FC de recuperación (caída de ppm a los 2 min de terminar) de hasta 10 actividades, sin cargar
+    el resto de datos (alternativa ligera a get_activity_full).
+    Devuelve por actividad: fecha, nombre, km, FC media/máx y recovery_hr (null si Garmin no la midió).
+    include_end_hr añade last_lap_avg_hr y last_lap_s (FC media y duración de la última vuelta): sirve de
+    aproximación a la FC al terminar, para estimar la FC absoluta a los 2 min (FC final - recovery_hr).
+    Cuanto más corta la última vuelta, mejor la aproximación."""
+    ids = [str(a).strip() for a in (activity_ids or []) if str(a).strip()]
+    if not 1 <= len(ids) <= 10:
+        raise ValueError("Indica entre 1 y 10 activity_ids.")
+    with FETCH_LOCK:
+        api = _get_api()
+        rows = [_recovery_hr_row(api, aid, include_end_hr) for aid in ids]
+    return {"count": len(rows), "activities": rows, "note": _RECOVERY_HR_NOTE}
+
+
+@mcp.tool
+def get_recovery_hr_trend(
+    start_date: str,
+    end_date: str = None,
+    activity_type: str = "running",
+    include_end_hr: bool = False,
+    max_activities: int = 30,
+) -> dict:
+    """Tendencia de FC de recuperación (2 min) entre dos fechas (YYYY-MM-DD), de más antigua a más reciente.
+    activity_type: running por defecto; vacío para todos los tipos. Máx. 60 actividades (las más recientes).
+    include_end_hr añade la FC de la última vuelta (una llamada más por actividad).
+    Un dato suelto no dice nada: compara sesiones del mismo tipo y con FC final parecida."""
+    if not 1 <= max_activities <= 60:
+        raise ValueError("max_activities entre 1 y 60.")
+    start = _parse_date(start_date)
+    end = _parse_date(end_date) if end_date else _today_local().isoformat()
+    if start > end:
+        start, end = end, start
+    with FETCH_LOCK:
+        api = _get_api()
+        if activity_type:
+            acts, err = _optional_call_first(api, ("get_activities_by_date",), start, end, activity_type)
+        else:
+            acts, err = _optional_call_first(api, ("get_activities_by_date",), start, end)
+        if acts is None:
+            raise RuntimeError(err or f"No pude leer actividades entre {start} y {end}")
+        acts = sorted(
+            (a for a in acts if isinstance(a, dict) and a.get("activityId") is not None),
+            key=lambda a: a.get("startTimeLocal") or "",
+        )
+        truncated = len(acts) > max_activities
+        acts = acts[-max_activities:]
+        rows = [_recovery_hr_row(api, str(a["activityId"]), include_end_hr) for a in acts]
+    values = [r["recovery_hr"] for r in rows if isinstance(r.get("recovery_hr"), (int, float))]
+    return {
+        "start_date": start,
+        "end_date": end,
+        "activity_type_filter": activity_type or None,
+        "count": len(rows),
+        "with_recovery_hr": len(values),
+        "mean_recovery_hr": round(sum(values) / len(values), 1) if values else None,
+        "truncated": truncated,
+        "activities": rows,
+        "note": _RECOVERY_HR_NOTE,
+    }
 # === COMPACT ANALYSIS TOOLS END ===
 
 
