@@ -1,67 +1,41 @@
 # Garmin Coach MCP
 
-Servidor MCP que conecta Garmin Connect con Claude y ChatGPT — 95 herramientas, datos en tiempo real · by AlejandrLucena
+Servidor MCP que conecta Garmin Connect con Claude y ChatGPT — 137 herramientas, datos en tiempo real · by AlejandrLucena
 
 ---
 
-## Tutorial paso a paso (desde cero, sin saber nada)
+## Puesta en marcha (Docker / Easypanel)
 
-Este tutorial asume que **no tienes ni idea** de GitHub ni Railway. Todo se hace en el navegador, en móvil o PC. Tiempo: ~10 minutos.
+El servidor es una app Python que se despliega con el `Dockerfile` del repo. Sirve igual en Easypanel, en cualquier VPS con Docker o en local.
 
 ### Lo que necesitas antes de empezar
-- Tu cuenta de **Garmin Connect** (la del reloj).
-- Una cuenta de **GitHub** (gratis). Si no tienes: ve a [github.com](https://github.com) → **Sign up**.
-- Una **IA con soporte de conectores MCP**: Claude, ChatGPT u otra compatible con MCP.
+- Tu cuenta de **Garmin Connect** (la del reloj) y acceso a su código MFA si lo tienes activo.
+- Un **fork** de este repo en tu cuenta de GitHub: <https://github.com/Alejandrlucena/garmin-coach-mcp> → **Fork**.
+- Un servidor con Docker (en Easypanel, un VPS tuyo).
+- Una **IA con soporte de conectores MCP**: Claude, ChatGPT u otra compatible.
 
----
+### Paso 1 · Crea la app desde tu fork
 
-### Paso 1 · Haz una copia del proyecto (fork)
+1. En Easypanel, crea una **App** nueva con origen **GitHub** y elige tu fork.
+2. Método de build: **Dockerfile** (el del repo).
+3. Puerto interno: **8000**.
+4. Añade un **volumen** montado en **`/data`**. Es imprescindible: ahí se guardan los tokens de Garmin, la contraseña del panel y los ajustes. Sin volumen se pierden en cada reinicio.
+5. Asigna un **dominio** a la app (con HTTPS) y despliega.
 
-Un "fork" es tu copia personal del proyecto en tu propia cuenta de GitHub.
+### Paso 2 · Configura todo desde el panel
 
-1. Abre el proyecto: <https://github.com/Alejandrlucena/garmin-coach-mcp>
-2. Arriba a la derecha, pulsa el botón **Fork**.
-3. En la pantalla que sale, pulsa **Create fork**.
-4. Ahora tienes tu copia en `https://github.com/TU-USUARIO/garmin-coach-mcp`.
+Abre tu dominio. Verás un **panel** con una lista de pasos:
 
-### Paso 2 · Crea tu cuenta de Railway (con GitHub)
-
-Railway es donde vivirá tu servidor (gratis para empezar).
-
-1. Ve a [railway.com](https://railway.com).
-2. Pulsa **Login** → **Login with GitHub**.
-3. Autoriza a Railway a acceder a tu GitHub (botón verde **Authorize**).
-
-### Paso 3 · Despliega tu copia
-
-1. En Railway, pulsa **New Project** (o **+ New**).
-2. Elige **Deploy from GitHub repo**.
-3. La primera vez te pedirá dar permiso: pulsa **Configure GitHub App** → marca tu fork `garmin-coach-mcp` (o "All repositories") → **Save**, y vuelve atrás.
-4. Selecciona tu repo `garmin-coach-mcp` en la lista.
-5. Railway detecta el `Dockerfile` y empieza a construir solo. Espera a que el deploy se ponga **Active** (verde). Tarda 2-5 min.
-
-### Paso 4 · Consigue la dirección web de tu servidor
-
-1. Cuando esté **Active**, entra en tu servicio.
-2. Ve a **Settings** → sección **Networking** → pulsa **Generate Domain**.
-3. Si te pregunta un puerto, pon **8000**.
-4. Te dará una dirección tipo `https://tu-proyecto.up.railway.app`. **Esa es tu web.**
-
-### Paso 5 · Configura todo desde el panel
-
-Abre tu dirección web. Verás un **panel** con una lista de pasos:
-
-1. **Conectar Garmin** → email + contraseña + el código que te llega al Gmail (MFA).
-2. **Guardado permanente** → tras loguearte, el panel te da un bloque de texto para pegar en Railway → Variables → Raw Editor. Guarda y redespliega. Si Railway inyectó automáticamente el `RAILWAY_API_TOKEN`, se marca solo sin que hagas nada.
-3. **Protección con contraseña** → eliges una contraseña para que solo tú puedas abrir el panel.
+1. **Conectar Garmin** → email + contraseña + el código MFA que te llega al correo.
+2. **Protección con contraseña** → eliges una contraseña para que solo tú puedas abrir el panel.
 
 Cada paso se pone en **verde ✅** cuando está hecho. El panel se refresca solo cada pocos segundos.
 
-### Paso 6 · Conéctalo a tu IA (Claude, ChatGPT, etc.)
+### Paso 3 · Conéctalo a tu IA (Claude, ChatGPT, etc.)
 
 Funciona con cualquier IA que acepte conectores MCP.
 
-1. En el panel, pulsa **Copiar URL del conector** (es `https://tu-proyecto.up.railway.app/mcp`).
+1. En el panel, pulsa **Copiar URL del conector** (es `https://tu-dominio/mcp`).
 2. En tu IA, ve a la sección de conectores/MCP y añade un conector personalizado:
    - **Claude**: Settings → **Connectors** → **Add custom connector**.
    - **ChatGPT**: Settings → **Connectors** (MCP) → añadir servidor.
@@ -69,12 +43,16 @@ Funciona con cualquier IA que acepte conectores MCP.
 3. Pega la URL → guarda.
 4. Listo. Ya puedes pedirle tus métricas de Garmin.
 
+### Actualizar el servidor
+
+Cuando se mergee un cambio en tu fork, vuelve a **desplegar** la app en Easypanel. Las herramientas nuevas aparecen en tu IA después de refrescar la lista de herramientas del conector.
+
 ---
 
 ### ¿Necesitas re-loguearte en el futuro?
 
 Cuando Garmin caduque tu sesión (raro, ~1 año) o cambies de contraseña en Garmin:
-- Abre tu panel (te pedirá tu contraseña), pulsa **Re-loguear Garmin** y repite el Paso 5.1. Desde el móvil, en 1 minuto.
+- Abre tu panel (te pedirá tu contraseña), pulsa **Re-loguear Garmin** y repite el Paso 2.1. Desde el móvil, en 1 minuto.
 
 ---
 
@@ -83,17 +61,15 @@ Cuando Garmin caduque tu sesión (raro, ~1 año) o cambies de contraseña en Gar
 ### El recorrido completo
 
 ```
-①  Fork en GitHub  +  Deploy en Railway
+①  Fork en GitHub  +  App en Easypanel (Dockerfile, puerto 8000, volumen /data)
         │
 ②  Abrir la URL  ───────────►   aparece el Panel de estado
         │
 ③  [Conectar Garmin]            email · contraseña · código MFA
         │
-④  [Guardado permanente]        pegar token en Railway Variables
+④  [Protección]                 elegir contraseña (con ojito 👁)
         │
-⑤  [Protección]                 elegir contraseña (con ojito 👁)
-        │
-⑥  Copiar URL /mcp  ────────►   pegar en Claude / ChatGPT
+⑤  Copiar URL /mcp  ────────►   pegar en Claude / ChatGPT
         │
       ✅  Listo
 ```
@@ -107,14 +83,12 @@ Garmin Coach MCP · Panel de estado
 Estado del setup
   ✅  Servidor desplegado          Activo y respondiendo
   ✅  Garmin conectado             Tokens válidos, caché al día
-  ✅  ⚠️  Guardado permanente      Activado / Sin configurar
   ✅  ⚠️  Protección con contraseña  Activada / [Activar]
   ✅  IA conectada / durmiendo / lista  Según uso
 
 Acciones
   [ Re-loguear Garmin ]
   [ Copiar URL del conector ]
-  [ Abrir Railway Variables ]
   [ Bloquear sesión ]
 ```
 
@@ -146,11 +120,9 @@ Introduce tu contraseña para acceder.
 
 Todo se hace desde el navegador, sin terminal. El servidor sirve un panel en `/` con asistentes guiados:
 
-- **`/` (panel de estado)**: muestra cada paso del setup (servidor, Garmin, guardado permanente, protección, Claude) en verde ✅ o pendiente ⚠️, con su botón de acción.
-- **Conectar Garmin**: reemplaza a `login_once.py`. Email + contraseña + MFA, todo web, en 3 pasos.
-- **Guardado permanente**: pega un Railway API token; el servidor guarda `GARMIN_TOKENS_JSON` y `RAILWAY_API_TOKEN` en Railway vía su API (usando `curl_cffi` para pasar Cloudflare). Cero copy-paste manual de variables.
-- **Protección con contraseña**: eliges tu propia contraseña (o generas una al azar). El servidor la guarda en Railway (`ADMIN_TOKEN`) **y** en un archivo local que lee en vivo → los cambios de contraseña son **instantáneos, sin reiniciar el servidor**.
-- **Auto-sync opcional**: con `AUTO_SYNC_TOKENS=1`, un hilo de fondo sincroniza el token maestro a Railway si rota.
+- **`/` (panel de estado)**: muestra cada paso del setup (servidor, Garmin, protección, IA) en verde ✅ o pendiente ⚠️, con su botón de acción.
+- **Conectar Garmin**: reemplaza a `login_once.py`. Email + contraseña + MFA, todo web, en 3 pasos. Los tokens se guardan en el volumen (`/data/garmin`).
+- **Protección con contraseña**: eliges tu propia contraseña (o generas una al azar). El servidor la guarda en un archivo del volumen que lee en vivo → los cambios de contraseña son **instantáneos, sin reiniciar el servidor** y sobreviven a reinicios mientras el volumen exista.
 
 ### Detalles del acceso por contraseña
 
@@ -158,14 +130,14 @@ Todo se hace desde el navegador, sin terminal. El servidor sirve un panel en `/`
 - **Sesión deslizante**: tras entrar, el navegador te recuerda 365 días y renueva el plazo en cada visita (como Instagram/X/TikTok). No te pide la contraseña una y otra vez.
 - **Bloquear sesión**: botón en el panel que borra la cookie; la próxima visita vuelve a pedir contraseña (útil en equipos compartidos).
 - **Cambiar contraseña**: botón **Cambiar** en la fila de Protección. Aplica al instante.
-- **¿Olvidaste la contraseña?**: la pantalla de bloqueo incluye un desplegable con enlace directo a las Variables de Railway, donde está/cambias `ADMIN_TOKEN`.
+- **¿Olvidaste la contraseña?**: si la pierdes, está en el fichero `admin_token` de la carpeta de tokens (`/data/garmin/admin_token`) o, si ese fichero no existe, en la variable `ADMIN_TOKEN` de tu app.
 
 ---
 
 ## Flujo técnico
 
 ```
-Garmin Connect → garminconnect (Python) → server.py → Railway → Claude / Web / Móvil
+Garmin Connect → garminconnect (Python) → server.py (Docker) → Claude / Web / Móvil
 ```
 
 ---
@@ -177,26 +149,30 @@ Garmin Connect → garminconnect (Python) → server.py → Railway → Claude /
 | `GET /` | Panel de estado y configuración (pide contraseña si está protegido) |
 | `GET /lock` | Cierra la sesión del panel (borra la cookie) |
 | `GET /login` | Wizard web para conectar / re-loguear en Garmin |
-| `GET/POST /setup/persistencia` | Asistente para activar el guardado permanente (Railway API token) |
+| `POST /login/submit` · `GET /login/wait` · `GET/POST /login/mfa` · `GET /login/result` | Pasos internos del wizard (envío de credenciales, espera, código MFA, resultado) |
 | `GET/POST /setup/proteccion` | Asistente para poner / cambiar la contraseña del panel |
 | `GET /health` | Estado del servidor y del caché |
+| `GET /dashboard/rows` · `GET /dashboard/deploy-status` | Fragmentos que el panel refresca solo: filas de estado y estado del despliegue |
 | `GET /activities?limit=30` | Lista de actividades recientes (JSON) con CORS |
 | `GET /download/{activity_id}` | Descarga el .zip/.fit de una actividad con CORS |
 | `GET /config` · `POST /config` | Configuración web persistida (solo clave `driveUrl`) |
+| `POST /config/share` · `GET /config/share/{share_id}` | Crea / lee una configuración compartida (se guarda en disco con un ID aleatorio) |
+| `GET /adj` · `DELETE /adj` | Lista todos los ajustes guardados (con uso de disco) / los borra todos |
 | `GET /adj/{activity_id}` | Obtiene los ajustes guardados de distancia/ritmo/vel para una actividad |
-| `POST /adj/{activity_id}` | Guarda ajustes de distancia/ritmo/vel para una actividad (persiste en volumen Railway) |
+| `POST /adj/{activity_id}` | Guarda ajustes de distancia/ritmo/vel para una actividad (persiste en el volumen) |
+| `DELETE /adj/{activity_id}` | Borra los ajustes de una actividad |
+| `GET /hrmax/candidates?start_date=...` | Carreras del rango con `maxHR` alto y pico sostenido calculado desde el FIT (candidatas a FCmáx; pensado para un job semanal de n8n) |
 | `POST /mcp` | Endpoint MCP principal para Claude |
 | `GET /debug/activities` · `GET /debug/audit` | Debug: actividades / métricas del caché |
+| `GET /debug/sleep-freshness` · `GET /debug/sleep-selection` | Debug: frescura y selección del dato de sueño en el snapshot |
 
 Todos los endpoints incluyen CORS completo (`allow_origins=["*"]`).
-
-Si defines `RAILWAY_FALLBACK_URL` (vacío por defecto), `/activities` y `/download` pueden reenviar a otra instancia cuando fallan los tokens locales. En despliegues normales no hace falta.
 
 ---
 
 ## Instalación local (solo para desarrollo)
 
-Solo necesitas esto si vas a modificar el código. Para uso normal, sigue el Quick Start de arriba.
+Solo necesitas esto si vas a modificar el código. Para uso normal, sigue la «Puesta en marcha» de arriba.
 
 ```bash
 git clone https://github.com/Alejandrlucena/garmin-coach-mcp.git
@@ -211,36 +187,34 @@ python server.py              # → http://localhost:8000
 
 ## Variables de entorno
 
-> No necesitas poner ninguna a mano: los asistentes web del panel las configuran por ti. Esta tabla es solo de referencia.
+> Con el volumen montado en `/data` no necesitas poner ninguna a mano: el panel guarda los tokens de Garmin y la contraseña en archivos del volumen. Esta tabla es de referencia.
 
-### Gestionadas por los asistentes web
+### Alternativa a los archivos del volumen
 | Variable | Descripción |
 |----------|-------------|
-| `GARMIN_TOKENS_JSON` | Tokens de Garmin (JSON o base64). La crea y actualiza el wizard de "Conectar Garmin". |
-| `RAILWAY_API_TOKEN` | Token de Railway para que los asistentes guarden variables solos. Lo configura "Guardado permanente". |
-| `ADMIN_TOKEN` | Contraseña del panel. La pone/cambia el asistente "Protección con contraseña". Mientras no exista, el panel está abierto (sin contraseña); una vez existe, el panel la pide. |
+| `GARMIN_TOKENS_JSON` | Tokens de Garmin (JSON o base64), como alternativa al fichero que crea el wizard de "Conectar Garmin". |
+| `ADMIN_TOKEN` | Contraseña del panel, como alternativa al fichero que escribe el asistente "Protección con contraseña". Mientras no exista ninguna, el panel está abierto (sin contraseña); una vez existe, el panel la pide. |
 
 ### Opcionales
 | Variable | Por defecto | Descripción |
 |----------|-------------|-------------|
-| `PORT` | `8000` | Puerto del servidor (Railway lo asigna) |
+| `PORT` | `8000` | Puerto del servidor |
+| `GARMIN_EMAIL` | _(vacío)_ | Email de Garmin; solo se usa si no hay tokens guardados |
 | `GARMIN_TOKEN_DIR` | `~/.garminconnect` | Carpeta de tokens en local |
+| `RESET_GARMIN_TOKENS` | `0` | Si `1` y hay `GARMIN_TOKENS_JSON`, sobrescribe el fichero de tokens local con esa variable al arrancar |
+| `GARMIN_DISABLE_PORTED_WRITES` | _(vacío)_ | Si `1`, las tools que escriben en tu cuenta (ver «Herramientas que escriben») se registran pero devuelven error |
+| `RECOVERY_MAX_FRESH_MINUTES` | `360` | Minutos tras los que el dato de recuperación del reloj se considera caducado |
+| `RECOVERY_CROSS_DAY_STALE_MINUTES` | `180` | Igual, pero si el dato es de un día anterior |
 | `GARMIN_TIMEZONE` | `Europe/Madrid` | Zona horaria local |
 | `GARMIN_LANGUAGE` | `es` | Idioma de traducciones |
 | `CACHE_MINUTES` | `30` | Minutos entre refresco de caché |
 | `ACTIVITY_LIMIT` | `8` | Límite de actividades en caché |
-| `AUTO_SYNC_TOKENS` | `0` | Si `1`, sincroniza el OAuth1 rotado a Railway cada 12h |
-| `AUTO_SYNC_INTERVAL_SECONDS` | `43200` | Intervalo del auto-sync (mínimo 3600) |
-| `RAILWAY_FALLBACK_URL` | _(vacío)_ | Opcional: reenvía a otra instancia si fallan los tokens locales |
-
-### Inyectadas automáticamente por Railway (no las pongas tú)
-- `RAILWAY_PROJECT_ID`, `RAILWAY_ENVIRONMENT_ID`, `RAILWAY_SERVICE_ID`
 
 ---
 
 ## Configuración web persistente (`/config`)
 
-El endpoint `/config` almacena la URL del Google Apps Script de Drive en el volumen de Railway (`/data/web_config.json`). Esto permite que el visualizador web sincronice su configuración automáticamente en todos los dispositivos: basta con introducir la URL del servidor una sola vez y la URL de Drive se carga sola.
+El endpoint `/config` almacena la URL del Google Apps Script de Drive en el volumen (`/data/web_config.json`). Esto permite que el visualizador web sincronice su configuración automáticamente en todos los dispositivos: basta con introducir la URL del servidor una sola vez y la URL de Drive se carga sola.
 
 - `GET /config` — devuelve `{"driveUrl": "..."}` o `{}`
 - `POST /config` — acepta `{"driveUrl": "..."}` y lo persiste en disco
@@ -251,12 +225,12 @@ Solo se permite la clave `driveUrl`. No se almacena ningún dato de usuario ni c
 
 ## Ajustes de actividad persistentes (`/adj/`)
 
-El endpoint `/adj/{activity_id}` permite al visualizador web [garmin-laps](https://github.com/Alejandrlucena/garmin-laps) persistir ajustes de distancia, ritmo y velocidad para cada actividad. Los datos se guardan en el volumen de Railway (`/data/adj/{activity_id}.json`).
+El endpoint `/adj/{activity_id}` permite al visualizador web [garmin-laps](https://github.com/Alejandrlucena/garmin-laps) persistir ajustes de distancia, ritmo y velocidad para cada actividad. Los datos se guardan en el volumen (`/data/adj/{activity_id}.json`).
 
 - `GET /adj/{activity_id}` — devuelve `{"dist":"12.5","pace":"4:12"}` o `{}` si no hay ajustes
 - `POST /adj/{activity_id}` — acepta un JSON con los campos ajustados (`dist`, `pace`, `speed`, etc.) y lo persiste en disco
 
-Esto permite que los ajustes sobrevivan a recargas de página y se sincronicen entre dispositivos conectados al mismo servidor Railway.
+Esto permite que los ajustes sobrevivan a recargas de página y se sincronicen entre dispositivos conectados al mismo servidor.
 
 ---
 
@@ -264,7 +238,7 @@ Esto permite que los ajustes sobrevivan a recargas de página y se sincronicen e
 
 El visualizador [garmin-laps](https://github.com/Alejandrlucena/garmin-laps) tiene un botón **🔌 Conector** que carga la actividad con un clic y renderiza la tabla directamente. Cada usuario configura la URL de su propio servidor en **⚙ Configurar**.
 
-- Despliega este repo en Railway, copia la URL que te dé y pégala en **⚙**
+- Despliega este repo, copia la URL de tu app y pégala en **⚙**
 - O arranca el servidor en local (`http://localhost:8000`) — sirve el `index.html` directamente, sin problemas de CORS
 - Soporta running, ciclismo y motorsport (moto, coche, kart) — el visualizador adapta las columnas según el tipo de actividad
 - Filtros de tipo en el panel: 🗂️ Todo · 🏃 Running · 🚴 Ciclismo · 🏍️ Motorsport 🏎️ (busca entre las últimas 500 actividades)
@@ -272,22 +246,22 @@ El visualizador [garmin-laps](https://github.com/Alejandrlucena/garmin-laps) tie
 
 ---
 
-## Herramientas MCP (95)
+## Herramientas MCP (137)
 
 ### Snapshot y caché
-`get_day_snapshot` · `get_cached_snapshot` · `get_raw_sources` · `get_cache_status` · `refresh_snapshot` · `get_window_rollup`
+`get_day_snapshot` · `get_cached_snapshot` · `get_raw_sources` · `refresh_snapshot` · `get_window_rollup`
 
 ### Actividades
-`get_recent_activities` · `get_recent_activities_full` · `get_recent_activities_catalog` · `get_recent_activities_all_data` · `get_activities_paged` · `get_activities_in_range` · `get_last_activity` · `get_activity_full` · `get_activity_all_data` · `get_activity_sport_profile` · `get_activity_visible_profile` · `get_activity_splits` · `get_activity_split_summaries` · `get_activity_time_series` · `get_activity_hr_in_timezones` · `get_activity_evaluation` · `get_activity_exercise_sets` · `get_activity_gear` · `get_activity_weather` · `get_activity_types` · `get_recent_activity_sport_profiles` · `get_activity_fit_download` · `download_activity` · `upload_activity`
+`get_recent_activities` · `get_recent_activities_full` · `get_recent_activities_catalog` · `get_recent_activities_all_data` · `get_activities_paged` · `get_activities_in_range` · `get_last_activity` · `get_activity_full` · `get_activity_all_data` · `get_activity_sport_profile` · `get_activity_visible_profile` · `get_activity_splits` · `get_activity_split_summaries` · `get_activity_time_series` · `get_activity_hr_in_timezones` · `get_activity_evaluation` · `get_activity_exercise_sets` · `get_activity_gear` · `get_activity_weather` · `get_activity_types` · `get_recent_activity_sport_profiles` · `get_activity_fit_download` · `download_activity` · `upload_activity` · `get_activity_fit_messages` · `get_activity_hr_peak` · `get_activity_typed_splits` · `get_activity_self_assessment` · `set_activity_name` · `set_activity_description` · `set_activity_type` · `set_perceived_effort` · `set_activity_feel` · `add_gear_to_activity` · `remove_gear_from_activity`
 
 ### Métricas diarias
-`get_stats` · `get_stats_and_body` · `get_daily_wellness` · `get_user_summary` · `get_steps_data` · `get_daily_steps` · `get_floors` · `get_all_day_stress` · `get_stress_data` · `get_heart_rates` · `get_rhr_day` · `get_body_battery` · `get_respiration_data` · `get_spo2_data` · `get_hydration_data` · `get_blood_pressure` · `get_body_composition`
+`get_stats` · `get_stats_and_body` · `get_daily_wellness` · `get_user_summary` · `get_steps_data` · `get_daily_steps` · `get_floors` · `get_all_day_stress` · `get_stress_data` · `get_heart_rates` · `get_rhr_day` · `get_body_battery` · `get_respiration_data` · `get_spo2_data` · `get_hydration_data` · `get_blood_pressure` · `get_body_composition` · `get_stats_range`
 
 ### Sueño y recuperación
-`get_sleep_data` · `get_hrv_data` · `get_training_readiness` · `get_wellness_range`
+`get_sleep_data` · `get_hrv_data` · `get_training_readiness` · `get_wellness_range` · `get_sleep_summary_range` · `get_hrv_trend` · `get_morning_training_readiness` · `get_recovery_time_remaining` · `get_respiration_trend`
 
 ### Entrenamiento y rendimiento
-`get_training_status` · `get_max_metrics` · `get_endurance_score` · `get_hill_score` · `get_race_predictions` · `get_personal_records` · `get_progress_summary` · `get_primary_device_info` · `get_fitness_age`
+`get_training_status` · `get_max_metrics` · `get_endurance_score` · `get_hill_score` · `get_race_predictions` · `get_personal_records` · `get_progress_summary` · `get_primary_device_info` · `get_fitness_age` · `get_training_effect` · `get_lactate_threshold` · `get_heart_rate_zones` · `get_vo2max_trend` · `get_training_load_trend` · `get_training_load_balance` · `get_running_tolerance_trend` · `get_weekly_intensity_minutes`
 
 ### Dispositivos y equipamiento
 `get_devices` · `get_device_settings` · `get_device_last_used` · `get_device_alarms` · `get_gear` · `get_gear_defaults` · `get_gear_stats` · `set_gear_default`
@@ -299,7 +273,7 @@ El visualizador [garmin-laps](https://github.com/Alejandrlucena/garmin-laps) tie
 `get_goals` · `get_earned_badges` · `get_available_badge_challenges` · `get_badge_challenges` · `get_adhoc_challenges` · `get_inprogress_virtual_challenges` · `get_non_completed_badge_challenges`
 
 ### Workouts y planes
-`get_workout_library` · `get_workout_detail` · `get_todays_workout` · `get_scheduled_workouts` · `schedule_workout` · `unschedule_workout` · `get_training_plans` · `get_training_plan_detail`
+`get_workout_library` · `get_workout_detail` · `get_todays_workout` · `get_scheduled_workouts` · `schedule_workout` · `unschedule_workout` · `get_training_plans` · `get_training_plan_detail` · `get_workout_compact` · `get_garmin_coach_workouts` · `get_calendar_range` · `get_calendar_events` · `preview_running_workout` · `create_running_workout` · `update_running_workout` · `delete_workout` · `delete_workouts` · `schedule_workouts` · `unschedule_workouts` · `reschedule_workout`
 
 ### Nutrición
 `get_nutrition_log`
@@ -307,20 +281,39 @@ El visualizador [garmin-laps](https://github.com/Alejandrlucena/garmin-laps) tie
 ### Perfil de usuario
 `get_user_profile_info`
 
+### Análisis compacto (datos ya calculados, sin cargar la actividad entera)
+- `get_time_in_zones`: tiempo en tus 3 zonas de FC (por defecto 140/165) en un rango, con comparación contra la distribución objetivo.
+- `get_weekly_summary`: km, minutos, carga, sesiones duras, descansos y planificado vs. ejecutado por semana (lunes–domingo).
+- `get_cardiac_drift`: deriva cardiaca (ritmo/FC) de una sesión, 1.ª mitad frente a 2.ª.
+- `get_comparable_runs`: evolución de ritmo y FC en carreras comparables (misma franja de distancia).
+- `get_recovery_hr`: FC de recuperación (caída de ppm a los 2 min) de hasta 10 actividades por ID. Con `include_end_hr` añade `last_lap_avg_hr`, `end_hr_reliable` (última vuelta ≤ 30 s) y `hr_at_2min` (FC final − caída; `null` si no es fiable).
+- `get_recovery_hr_trend`: lo mismo para un rango de fechas, de más antigua a más reciente, con la media (máx. 60 actividades).
+
+### Herramientas que escriben en tu cuenta de Garmin
+`set_activity_name` · `set_activity_description` · `set_activity_type` · `set_perceived_effort` · `set_activity_feel` · `add_gear_to_activity` · `remove_gear_from_activity` · `schedule_workout` · `unschedule_workout` · `schedule_workouts` · `unschedule_workouts` · `reschedule_workout` · `create_running_workout` · `update_running_workout` · `delete_workout` · `delete_workouts` · `upload_activity` · `add_weigh_in` · `delete_weigh_in` · `delete_weigh_ins` · `set_gear_default`
+
+Con `GARMIN_DISABLE_PORTED_WRITES=1` se desactivan `set_activity_*`, `set_perceived_effort`, `set_activity_feel`, `add_gear_to_activity`, `remove_gear_from_activity`, `schedule_workouts`, `unschedule_workouts`, `delete_workouts` y `reschedule_workout`. Las demás de esta lista no están cubiertas por ese interruptor.
+
 ### Hybrid Coach (Claude-native)
 `get_hybrid_user_briefing` · `get_hybrid_coach_snapshot` · `get_hybrid_coach_decision` · `get_hybrid_recent_overview` · `get_hybrid_nutrition_briefing`
 
 ---
+
+## Tests
+
+```bash
+pip install -r requirements.txt pytest
+python -m pytest tests -q      # sin red: usan una API de Garmin simulada
+```
 
 ## Archivos
 
 | Archivo | Descripción |
 |---------|-------------|
 | `server.py` | Servidor principal — tools MCP + endpoints HTTP |
+| `tests/` | Tests con `pytest` y una API simulada (herramientas de análisis, portadas y FC de recuperación) |
 | `login_once.py` | Script para autenticar y generar tokens locales |
 | `requirements.txt` | Dependencias Python |
-| `Dockerfile` | Para despliegue en Railway |
-| `railway.toml` | Configuración Railway |
-| `bootstrap.sh` | Script de inicio en Railway |
+| `Dockerfile` | Imagen para desplegar (Easypanel, Docker, VPS) |
 | `.env.example` | Variables de entorno de ejemplo |
 
